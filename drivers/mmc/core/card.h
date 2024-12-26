@@ -1,11 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Private header for the mmc subsystem
  *
  * Copyright (C) 2016 Linaro Ltd
  *
  * Author: Ulf Hansson <ulf.hansson@linaro.org>
- *
- * License terms: GNU General Public License (GPL) version 2
  */
 
 #ifndef _MMC_CORE_CARD_H
@@ -78,6 +77,7 @@ struct mmc_fixup {
 #define CID_MANFID_APACER       0x27
 #define CID_MANFID_KINGSTON     0x70
 #define CID_MANFID_HYNIX	0x90
+#define CID_MANFID_DH		0xAD
 #define CID_MANFID_NUMONYX	0xFE
 
 #define END_FIXUP { NULL }

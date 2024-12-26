@@ -68,7 +68,7 @@
  * Lacking toolchain and or architecture support, static keys fall back to a
  * simple conditional branch.
  *
- * Additional babbling in: Documentation/static-keys.txt
+ * Additional babbling in: Documentation/staging/static-keys.rst
  */
 
 #ifndef __ASSEMBLY__
@@ -113,7 +113,7 @@ struct static_key {
 #endif	/* CONFIG_JUMP_LABEL */
 #endif /* __ASSEMBLY__ */
 
-#ifdef CONFIG_JUMP_LABEL
+#if defined(CONFIG_JUMP_LABEL) && !defined(BUILD_FIPS140_KO)
 #include <asm/jump_label.h>
 
 #ifndef __ASSEMBLY__
@@ -188,7 +188,28 @@ enum jump_label_type {
 
 struct module;
 
-#ifdef CONFIG_JUMP_LABEL
+#ifdef BUILD_FIPS140_KO
+
+static inline int static_key_count(struct static_key *key)
+{
+	return atomic_read(&key->enabled);
+}
+
+static __always_inline bool static_key_false(struct static_key *key)
+{
+	if (unlikely(static_key_count(key) > 0))
+		return true;
+	return false;
+}
+
+static __always_inline bool static_key_true(struct static_key *key)
+{
+	if (likely(static_key_count(key) > 0))
+		return true;
+	return false;
+}
+
+#elif defined(CONFIG_JUMP_LABEL)
 
 #define JUMP_TYPE_FALSE		0UL
 #define JUMP_TYPE_TRUE		1UL
@@ -215,6 +236,9 @@ extern void arch_jump_label_transform(struct jump_entry *entry,
 				      enum jump_label_type type);
 extern void arch_jump_label_transform_static(struct jump_entry *entry,
 					     enum jump_label_type type);
+extern bool arch_jump_label_transform_queue(struct jump_entry *entry,
+					    enum jump_label_type type);
+extern void arch_jump_label_transform_apply(void);
 extern int jump_label_text_reserved(void *start, void *end);
 extern void static_key_slow_inc(struct static_key *key);
 extern void static_key_slow_dec(struct static_key *key);
@@ -390,7 +414,7 @@ extern bool ____wrong_branch_error(void);
 	static_key_count((struct static_key *)x) > 0;				\
 })
 
-#ifdef CONFIG_JUMP_LABEL
+#if defined(CONFIG_JUMP_LABEL) && !defined(BUILD_FIPS140_KO)
 
 /*
  * Combine the right initial value (type) with the right branch order

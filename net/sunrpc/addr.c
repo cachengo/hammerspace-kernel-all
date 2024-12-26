@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2009, Oracle.  All rights reserved.
  *
@@ -24,9 +25,12 @@
 
 #if IS_ENABLED(CONFIG_IPV6)
 
-size_t rpc_ntop6_addr_noscopeid(const struct in6_addr *addr,
-				char *buf, const int buflen)
+static size_t rpc_ntop6_noscopeid(const struct sockaddr *sap,
+				  char *buf, const int buflen)
 {
+	const struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sap;
+	const struct in6_addr *addr = &sin6->sin6_addr;
+
 	/*
 	 * RFC 4291, Section 2.2.2
 	 *
@@ -51,22 +55,12 @@ size_t rpc_ntop6_addr_noscopeid(const struct in6_addr *addr,
 	 */
 	if (ipv6_addr_v4mapped(addr))
 		return snprintf(buf, buflen, "::ffff:%pI4",
-				&addr->s6_addr32[3]);
+					&addr->s6_addr32[3]);
 
 	/*
 	 * RFC 4291, Section 2.2.1
 	 */
 	return snprintf(buf, buflen, "%pI6c", addr);
-}
-EXPORT_SYMBOL_GPL(rpc_ntop6_addr_noscopeid);
-
-static size_t rpc_ntop6_noscopeid(const struct sockaddr *sap,
-				  char *buf, const int buflen)
-{
-	const struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sap;
-	const struct in6_addr *addr = &sin6->sin6_addr;
-
-	return rpc_ntop6_addr_noscopeid(addr, buf, buflen);
 }
 
 static size_t rpc_ntop6(const struct sockaddr *sap,
@@ -88,11 +82,11 @@ static size_t rpc_ntop6(const struct sockaddr *sap,
 
 	rc = snprintf(scopebuf, sizeof(scopebuf), "%c%u",
 			IPV6_SCOPE_DELIMITER, sin6->sin6_scope_id);
-	if (unlikely((size_t)rc > sizeof(scopebuf)))
+	if (unlikely((size_t)rc >= sizeof(scopebuf)))
 		return 0;
 
 	len += rc;
-	if (unlikely(len > buflen))
+	if (unlikely(len >= buflen))
 		return 0;
 
 	strcat(buf, scopebuf);
@@ -181,7 +175,7 @@ static int rpc_parse_scope_id(struct net *net, const char *buf,
 		return 0;
 
 	len = (buf + buflen) - delim - 1;
-	p = kstrndup(delim + 1, len, GFP_KERNEL);
+	p = kmemdup_nul(delim + 1, len, GFP_KERNEL);
 	if (p) {
 		u32 scope_id = 0;
 		struct net_device *dev;
@@ -191,7 +185,7 @@ static int rpc_parse_scope_id(struct net *net, const char *buf,
 			scope_id = dev->ifindex;
 			dev_put(dev);
 		} else {
-			if (kstrtou32(p, 10, &scope_id) == 0) {
+			if (kstrtou32(p, 10, &scope_id) != 0) {
 				kfree(p);
 				return 0;
 			}

@@ -205,17 +205,6 @@ struct rpc_wait_queue {
 #endif
 };
 
-struct rpc_completion {
-	unsigned int		done;
-	struct rpc_wait_queue	queue;
-	struct rcu_head		rcu_head;
-};
-
-struct rpc_completion *rpc_completion_alloc(gfp_t flags);
-void rpc_completion_free_rcu(struct rpc_completion *rc);
-void rpc_completion_complete(struct rpc_completion *rc);
-bool rpc_completion_wait(struct rpc_completion *rc, struct rpc_task *task);
-
 /*
  * This is the # requests to send consecutively
  * from a single cookie.  The aim is to improve
@@ -254,9 +243,6 @@ void		rpc_sleep_on_priority_timeout(struct rpc_wait_queue *queue,
 void		rpc_sleep_on_priority(struct rpc_wait_queue *,
 					struct rpc_task *,
 					int priority);
-void rpc_wake_up_queued_task_on_wq(struct workqueue_struct *wq,
-		struct rpc_wait_queue *queue,
-		struct rpc_task *task);
 void		rpc_wake_up_queued_task(struct rpc_wait_queue *,
 					struct rpc_task *);
 void		rpc_wake_up_queued_task_set_status(struct rpc_wait_queue *,

@@ -3,11 +3,23 @@
  * Copyright (c) 2018, The Linux Foundation
  */
 
+#include <linux/irq.h>
+#include <linux/irqchip.h>
+#include <linux/irqdesc.h>
+#include <linux/irqchip/chained_irq.h>
 #include "dpu_kms.h"
 
 #define to_dpu_mdss(x) container_of(x, struct dpu_mdss, base)
 
+#define HW_REV				0x0
 #define HW_INTR_STATUS			0x0010
+
+#define UBWC_STATIC			0x144
+#define UBWC_CTRL_2			0x150
+#define UBWC_PREDICTION_MODE		0x154
+
+/* Max BW defined in KBps */
+#define MAX_BW				6800000
 
 struct dpu_irq_controller {
 	unsigned long enabled_mask;
@@ -17,8 +29,6 @@ struct dpu_irq_controller {
 struct dpu_mdss {
 	struct msm_mdss base;
 	void __iomem *mmio;
-	unsigned long mmio_len;
-	u32 hwversion;
 	struct dss_module_power mp;
 	struct dpu_irq_controller irq_controller;
 };
@@ -137,8 +147,30 @@ static int dpu_mdss_enable(struct msm_mdss *mdss)
 	int ret;
 
 	ret = msm_dss_enable_clk(mp->clk_config, mp->num_clk, true);
-	if (ret)
+	if (ret) {
 		DPU_ERROR("clock enable failed, ret:%d\n", ret);
+		return ret;
+	}
+
+	/*
+	 * ubwc config is part of the "mdss" region which is not accessible
+	 * from the rest of the driver. hardcode known configurations here
+	 */
+	switch (readl_relaxed(dpu_mdss->mmio + HW_REV)) {
+	case DPU_HW_VER_500:
+	case DPU_HW_VER_501:
+		writel_relaxed(0x420, dpu_mdss->mmio + UBWC_STATIC);
+		break;
+	case DPU_HW_VER_600:
+		/* TODO: 0x102e for LP_DDR4 */
+		writel_relaxed(0x103e, dpu_mdss->mmio + UBWC_STATIC);
+		writel_relaxed(2, dpu_mdss->mmio + UBWC_CTRL_2);
+		writel_relaxed(1, dpu_mdss->mmio + UBWC_PREDICTION_MODE);
+		break;
+	case DPU_HW_VER_620:
+		writel_relaxed(0x1e, dpu_mdss->mmio + UBWC_STATIC);
+		break;
+	}
 
 	return ret;
 }
@@ -188,10 +220,9 @@ int dpu_mdss_init(struct drm_device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev->dev);
 	struct msm_drm_private *priv = dev->dev_private;
-	struct resource *res;
 	struct dpu_mdss *dpu_mdss;
 	struct dss_module_power *mp;
-	int ret = 0;
+	int ret;
 	int irq;
 
 	dpu_mdss = devm_kzalloc(dev->dev, sizeof(*dpu_mdss), GFP_KERNEL);
@@ -203,13 +234,6 @@ int dpu_mdss_init(struct drm_device *dev)
 		return PTR_ERR(dpu_mdss->mmio);
 
 	DRM_DEBUG("mapped mdss address space @%pK\n", dpu_mdss->mmio);
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mdss");
-	if (!res) {
-		DRM_ERROR("failed to get memory resource for mdss\n");
-		return -ENOMEM;
-	}
-	dpu_mdss->mmio_len = resource_size(res);
 
 	mp = &dpu_mdss->mp;
 	ret = msm_dss_parse_clock(pdev, mp);
@@ -226,21 +250,19 @@ int dpu_mdss_init(struct drm_device *dev)
 		goto irq_domain_error;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
+	if (irq < 0) {
+		ret = irq;
 		goto irq_error;
+	}
 
 	irq_set_chained_handler_and_data(irq, dpu_mdss_irq,
 					 dpu_mdss);
 
-	pm_runtime_enable(dev->dev);
-
-	pm_runtime_get_sync(dev->dev);
-	dpu_mdss->hwversion = readl_relaxed(dpu_mdss->mmio);
-	pm_runtime_put_sync(dev->dev);
-
 	priv->mdss = &dpu_mdss->base;
 
-	return ret;
+	pm_runtime_enable(dev->dev);
+
+	return 0;
 
 irq_error:
 	_dpu_mdss_irq_domain_fini(dpu_mdss);

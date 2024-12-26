@@ -130,8 +130,7 @@ unx_marshal(struct rpc_task *task, struct xdr_stream *xdr)
 	gidarr_len = p++;
 	if (gi)
 		for (i = 0; i < UNX_NGROUPS && i < gi->ngroups; i++)
-			*p++ = cpu_to_be32(from_kgid_munged(userns,
-							    gi->gid[i]));
+			*p++ = cpu_to_be32(from_kgid_munged(userns, gi->gid[i]));
 	*gidarr_len = cpu_to_be32(p - gidarr_len - 1);
 	*cred_len = cpu_to_be32((p - cred_len - 1) << 2);
 	p = xdr_reserve_space(xdr, (p - gidarr_len - 1) << 2);

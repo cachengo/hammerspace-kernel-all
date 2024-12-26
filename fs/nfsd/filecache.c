@@ -6,7 +6,6 @@
 
 #include <linux/hash.h>
 #include <linux/slab.h>
-#include <linux/hash.h>
 #include <linux/file.h>
 #include <linux/sched.h>
 #include <linux/list_lru.h>
@@ -33,7 +32,7 @@
 #define NFSD_FILE_LRU_LIMIT		     (NFSD_FILE_LRU_THRESHOLD << 2)
 
 /* We only care about NFSD_MAY_READ/WRITE for this cache */
-#define NFSD_FILE_MAY_MASK	(NFSD_MAY_READ|NFSD_MAY_WRITE|NFSD_MAY_LOCALIO)
+#define NFSD_FILE_MAY_MASK	(NFSD_MAY_READ|NFSD_MAY_WRITE)
 
 struct nfsd_fcache_bucket {
 	struct hlist_head	nfb_head;
@@ -53,7 +52,7 @@ struct nfsd_fcache_disposal {
 	struct rcu_head rcu;
 };
 
-struct workqueue_struct *nfsd_filecache_wq __read_mostly;
+static struct workqueue_struct *nfsd_filecache_wq __read_mostly;
 
 static struct kmem_cache		*nfsd_file_slab;
 static struct kmem_cache		*nfsd_file_mark_slab;
@@ -599,11 +598,9 @@ static struct notifier_block nfsd_file_lease_notifier = {
 };
 
 static int
-nfsd_file_fsnotify_handle_event(struct fsnotify_group *group,
-				struct inode *inode,
-				u32 mask, const void *data, int data_type,
-				const unsigned char *file_name, u32 cookie,
-				struct fsnotify_iter_info *iter_info)
+nfsd_file_fsnotify_handle_event(struct fsnotify_mark *mark, u32 mask,
+				struct inode *inode, struct inode *dir,
+				const struct qstr *name, u32 cookie)
 {
 	trace_nfsd_file_fsnotify_handle_event(inode, mask);
 
@@ -625,7 +622,7 @@ nfsd_file_fsnotify_handle_event(struct fsnotify_group *group,
 
 
 static const struct fsnotify_ops nfsd_file_fsnotify_ops = {
-	.handle_event = nfsd_file_fsnotify_handle_event,
+	.handle_inode_event = nfsd_file_fsnotify_handle_event,
 	.free_mark = nfsd_file_mark_free,
 };
 
@@ -718,6 +715,9 @@ out_err:
 	goto out;
 }
 
+/*
+ * Note this can deadlock with nfsd_file_lru_cb.
+ */
 void
 nfsd_file_cache_purge(struct net *net)
 {
@@ -725,6 +725,7 @@ nfsd_file_cache_purge(struct net *net)
 	struct nfsd_file	*nf;
 	struct hlist_node	*next;
 	LIST_HEAD(dispose);
+	bool del;
 
 	if (!nfsd_file_hashtbl)
 		return;
@@ -736,7 +737,13 @@ nfsd_file_cache_purge(struct net *net)
 		hlist_for_each_entry_safe(nf, next, &nfb->nfb_head, nf_node) {
 			if (net && nf->nf_net != net)
 				continue;
-			nfsd_file_unhash_and_release_locked(nf, &dispose);
+			del = nfsd_file_unhash_and_release_locked(nf, &dispose);
+
+			/*
+			 * Deadlock detected! Something marked this entry as
+			 * unhased, but hasn't removed it from the hash list.
+			 */
+			WARN_ON_ONCE(!del);
 		}
 		spin_unlock(&nfb->nfb_lock);
 		nfsd_file_dispose_list(&dispose);
@@ -828,8 +835,6 @@ nfsd_file_cache_shutdown_net(struct net *net)
 void
 nfsd_file_cache_shutdown(void)
 {
-	LIST_HEAD(dispose);
-
 	set_bit(NFSD_FILE_SHUTDOWN, &nfsd_file_lru_flags);
 
 	lease_unregister_notifier(&nfsd_file_lease_notifier);
@@ -883,16 +888,16 @@ nfsd_file_find_locked(struct inode *inode, unsigned int may_flags,
 	unsigned char need = may_flags & NFSD_FILE_MAY_MASK;
 
 	hlist_for_each_entry_rcu(nf, &nfsd_file_hashtbl[hashval].nfb_head,
-				 nf_node) {
-		if (!test_bit(NFSD_FILE_HASHED, &nf->nf_flags))
-			continue;
-		if ((need & nf->nf_may) != need)
+				 nf_node, lockdep_is_held(&nfsd_file_hashtbl[hashval].nfb_lock)) {
+		if (nf->nf_may != need)
 			continue;
 		if (nf->nf_inode != inode)
 			continue;
 		if (nf->nf_net != net)
 			continue;
 		if (!nfsd_match_cred(nf->nf_cred, current_cred()))
+			continue;
+		if (!test_bit(NFSD_FILE_HASHED, &nf->nf_flags))
 			continue;
 		if (nfsd_file_get(nf) != NULL)
 			return nf;

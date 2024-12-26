@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * rt5640.c  --  RT5640/RT5639 ALSA SoC audio codec driver
  *
  * Copyright 2011 Realtek Semiconductor Corp.
  * Author: Johnny Hsu <johnnyhsu@realtek.com>
  * Copyright (c) 2013, NVIDIA CORPORATION.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -342,9 +339,9 @@ static bool rt5640_readable_register(struct device *dev, unsigned int reg)
 }
 
 static const DECLARE_TLV_DB_SCALE(out_vol_tlv, -4650, 150, 0);
-static const DECLARE_TLV_DB_SCALE(dac_vol_tlv, -65625, 375, 0);
+static const DECLARE_TLV_DB_MINMAX(dac_vol_tlv, -6562, 0);
 static const DECLARE_TLV_DB_SCALE(in_vol_tlv, -3450, 150, 0);
-static const DECLARE_TLV_DB_SCALE(adc_vol_tlv, -17625, 375, 0);
+static const DECLARE_TLV_DB_MINMAX(adc_vol_tlv, -1762, 3000);
 static const DECLARE_TLV_DB_SCALE(adc_bst_tlv, 0, 1200, 0);
 
 /* {0, +20, +24, +30, +35, +40, +44, +50, +52} dB */
@@ -1338,7 +1335,9 @@ static const struct snd_soc_dapm_route rt5640_dapm_routes[] = {
 	{ "I2S2", NULL, "I2S2 Filter ASRC", is_using_asrc },
 	{ "DMIC1", NULL, "DMIC1 ASRC", is_using_asrc },
 	{ "DMIC2", NULL, "DMIC2 ASRC", is_using_asrc },
-
+	{"IN1P", NULL, "MICBIAS1"},
+	{"IN2P", NULL, "MICBIAS1"},
+	{"IN3P", NULL, "MICBIAS1"},
 	{"IN1P", NULL, "LDO2"},
 	{"IN2P", NULL, "LDO2"},
 	{"IN3P", NULL, "LDO2"},
@@ -1654,7 +1653,7 @@ static int get_sdp_info(struct snd_soc_component *component, int dai_id)
 	if (component == NULL)
 		return -EINVAL;
 
-	val = snd_soc_component_read32(component, RT5640_I2S1_SDP);
+	val = snd_soc_component_read(component, RT5640_I2S1_SDP);
 	val = (val & RT5640_I2S_IF_MASK) >> RT5640_I2S_IF_SFT;
 	switch (dai_id) {
 	case RT5640_AIF1:
@@ -1665,7 +1664,7 @@ static int get_sdp_info(struct snd_soc_component *component, int dai_id)
 			break;
 		case RT5640_IF_113:
 			ret |= RT5640_U_IF1;
-			/* fall through */
+			fallthrough;
 		case RT5640_IF_312:
 		case RT5640_IF_213:
 			ret |= RT5640_U_IF2;
@@ -1681,7 +1680,7 @@ static int get_sdp_info(struct snd_soc_component *component, int dai_id)
 			break;
 		case RT5640_IF_223:
 			ret |= RT5640_U_IF1;
-			/* fall through */
+			fallthrough;
 		case RT5640_IF_123:
 		case RT5640_IF_321:
 			ret |= RT5640_U_IF2;
@@ -2084,7 +2083,7 @@ int rt5640_sel_asrc_clk_src(struct snd_soc_component *component,
 	snd_soc_component_update_bits(component, RT5640_ASRC_2,
 		asrc2_mask, asrc2_value);
 
-	if (snd_soc_component_read32(component, RT5640_ASRC_2)) {
+	if (snd_soc_component_read(component, RT5640_ASRC_2)) {
 		rt5640->asrc_en = true;
 		snd_soc_component_update_bits(component, RT5640_JD_CTRL, 0x3, 0x3);
 	} else {
@@ -2149,7 +2148,7 @@ static bool rt5640_micbias1_ovcd(struct snd_soc_component *component)
 {
 	int val;
 
-	val = snd_soc_component_read32(component, RT5640_IRQ_CTRL2);
+	val = snd_soc_component_read(component, RT5640_IRQ_CTRL2);
 	dev_dbg(component->dev, "irq ctrl2 %#04x\n", val);
 
 	return (val & RT5640_MB1_OC_STATUS);
@@ -2160,7 +2159,7 @@ static bool rt5640_jack_inserted(struct snd_soc_component *component)
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
 	int val;
 
-	val = snd_soc_component_read32(component, RT5640_INT_IRQ_ST);
+	val = snd_soc_component_read(component, RT5640_INT_IRQ_ST);
 	dev_dbg(component->dev, "irq status %#04x\n", val);
 
 	if (rt5640->jd_inverted)
@@ -2435,6 +2434,13 @@ static void rt5640_disable_jack_detect(struct snd_soc_component *component)
 {
 	struct rt5640_priv *rt5640 = snd_soc_component_get_drvdata(component);
 
+	/*
+	 * soc_remove_component() force-disables jack and thus rt5640->jack
+	 * could be NULL at the time of driver's module unloading.
+	 */
+	if (!rt5640->jack)
+		return;
+
 	disable_irq(rt5640->irq);
 	rt5640_cancel_work(rt5640);
 
@@ -2480,7 +2486,7 @@ static int rt5640_probe(struct snd_soc_component *component)
 	snd_soc_component_update_bits(component, RT5640_MICBIAS, 0x0030, 0x0030);
 	snd_soc_component_update_bits(component, RT5640_DSP_PATH2, 0xfc00, 0x0c00);
 
-	switch (snd_soc_component_read32(component, RT5640_RESET) & RT5640_ID_MASK) {
+	switch (snd_soc_component_read(component, RT5640_RESET) & RT5640_ID_MASK) {
 	case RT5640_ID_5640:
 	case RT5640_ID_5642:
 		snd_soc_add_component_controls(component,

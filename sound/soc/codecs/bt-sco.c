@@ -1,12 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for generic Bluetooth SCO link
  * Copyright 2011 Lars-Peter Clausen <lars@metafoo.de>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #include <linux/init.h>
@@ -31,14 +26,14 @@ static struct snd_soc_dai_driver bt_sco_dai[] = {
 		.playback = {
 			.stream_name = "Playback",
 			.channels_min = 1,
-			.channels_max = 1,
+			.channels_max = 2,
 			.rates = SNDRV_PCM_RATE_8000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
 		.capture = {
 			 .stream_name = "Capture",
 			.channels_min = 1,
-			.channels_max = 1,
+			.channels_max = 2,
 			.rates = SNDRV_PCM_RATE_8000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
@@ -48,14 +43,14 @@ static struct snd_soc_dai_driver bt_sco_dai[] = {
 		.playback = {
 			.stream_name = "Playback",
 			.channels_min = 1,
-			.channels_max = 1,
+			.channels_max = 2,
 			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
 		.capture = {
 			 .stream_name = "Capture",
 			.channels_min = 1,
-			.channels_max = 1,
+			.channels_max = 2,
 			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},

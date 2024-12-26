@@ -1,29 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef __SOUND_INFO_H
 #define __SOUND_INFO_H
 
 /*
  *  Header file for info interface
  *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 #include <linux/poll.h>
 #include <linux/seq_file.h>
+#include <linux/android_kabi.h>
 #include <sound/core.h>
 
 /* buffer for information */
@@ -70,6 +56,8 @@ struct snd_info_entry_ops {
 	int (*mmap)(struct snd_info_entry *entry, void *file_private_data,
 		    struct inode *inode, struct file *file,
 		    struct vm_area_struct *vma);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct snd_info_entry {
@@ -79,7 +67,7 @@ struct snd_info_entry {
 	unsigned short content;
 	union {
 		struct snd_info_entry_text text;
-		struct snd_info_entry_ops *ops;
+		const struct snd_info_entry_ops *ops;
 	} c;
 	struct snd_info_entry *parent;
 	struct module *module;
@@ -89,6 +77,8 @@ struct snd_info_entry {
 	struct mutex access;
 	struct list_head children;
 	struct list_head list;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 #if defined(CONFIG_SND_OSSEMUL) && defined(CONFIG_SND_PROC_FS)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2002,2003 by Andreas Gruenbacher <a.gruenbacher@computer.org>
  *
@@ -22,7 +23,7 @@
 #include <linux/export.h>
 #include <linux/user_namespace.h>
 
-static struct base_acl **acl_by_type(struct inode *inode, int type)
+static struct posix_acl **acl_by_type(struct inode *inode, int type)
 {
 	switch (type) {
 	case ACL_TYPE_ACCESS:
@@ -36,48 +37,47 @@ static struct base_acl **acl_by_type(struct inode *inode, int type)
 
 struct posix_acl *get_cached_acl(struct inode *inode, int type)
 {
-	struct base_acl **p = acl_by_type(inode, type);
-	struct base_acl *acl;
+	struct posix_acl **p = acl_by_type(inode, type);
+	struct posix_acl *acl;
 
 	for (;;) {
 		rcu_read_lock();
 		acl = rcu_dereference(*p);
-		if (!acl || !IS_POSIXACL(inode) || is_uncached_base_acl(acl) ||
-		    refcount_inc_not_zero(&acl->ba_refcount))
+		if (!acl || is_uncached_acl(acl) ||
+		    refcount_inc_not_zero(&acl->a_refcount))
 			break;
 		rcu_read_unlock();
 		cpu_relax();
 	}
 	rcu_read_unlock();
-	return container_of(acl, struct posix_acl, a_base);
+	return acl;
 }
 EXPORT_SYMBOL(get_cached_acl);
 
 struct posix_acl *get_cached_acl_rcu(struct inode *inode, int type)
 {
-	struct base_acl *acl = rcu_dereference(*acl_by_type(inode, type));
-	return container_of(acl, struct posix_acl, a_base);
+	return rcu_dereference(*acl_by_type(inode, type));
 }
 EXPORT_SYMBOL(get_cached_acl_rcu);
 
 void set_cached_acl(struct inode *inode, int type, struct posix_acl *acl)
 {
-	struct base_acl **p = acl_by_type(inode, type);
-	struct base_acl *old;
+	struct posix_acl **p = acl_by_type(inode, type);
+	struct posix_acl *old;
 
-	old = xchg(p, &posix_acl_dup(acl)->a_base);
-	if (!is_uncached_base_acl(old))
-		base_acl_put(old);
+	old = xchg(p, posix_acl_dup(acl));
+	if (!is_uncached_acl(old))
+		posix_acl_release(old);
 }
 EXPORT_SYMBOL(set_cached_acl);
 
-static void __forget_cached_acl(struct base_acl **p)
+static void __forget_cached_acl(struct posix_acl **p)
 {
-	struct base_acl *old;
+	struct posix_acl *old;
 
 	old = xchg(p, ACL_NOT_CACHED);
-	if (!is_uncached_base_acl(old))
-		base_acl_put(old);
+	if (!is_uncached_acl(old))
+		posix_acl_release(old);
 }
 
 void forget_cached_acl(struct inode *inode, int type)
@@ -96,7 +96,7 @@ EXPORT_SYMBOL(forget_all_cached_acls);
 struct posix_acl *get_acl(struct inode *inode, int type)
 {
 	void *sentinel;
-	struct base_acl **p;
+	struct posix_acl **p;
 	struct posix_acl *acl;
 
 	/*
@@ -105,12 +105,12 @@ struct posix_acl *get_acl(struct inode *inode, int type)
 	 * It is guaranteed that is_uncached_acl(sentinel) is true.
 	 */
 
-	if (!IS_POSIXACL(inode))
-		return NULL;
-
 	acl = get_cached_acl(inode, type);
 	if (!is_uncached_acl(acl))
 		return acl;
+
+	if (!IS_POSIXACL(inode))
+		return NULL;
 
 	sentinel = uncached_acl_sentinel(current);
 	p = acl_by_type(inode, type);
@@ -153,7 +153,7 @@ struct posix_acl *get_acl(struct inode *inode, int type)
 	 * Cache the result, but only if our sentinel is still in place.
 	 */
 	posix_acl_dup(acl);
-	if (unlikely(cmpxchg(p, sentinel, &acl->a_base) != sentinel))
+	if (unlikely(cmpxchg(p, sentinel, acl) != sentinel))
 		posix_acl_release(acl);
 	return acl;
 }
@@ -165,7 +165,7 @@ EXPORT_SYMBOL(get_acl);
 void
 posix_acl_init(struct posix_acl *acl, int count)
 {
-	base_acl_init(&acl->a_base);
+	refcount_set(&acl->a_refcount, 1);
 	acl->a_count = count;
 }
 EXPORT_SYMBOL(posix_acl_init);
@@ -198,7 +198,7 @@ posix_acl_clone(const struct posix_acl *acl, gfp_t flags)
 		           sizeof(struct posix_acl_entry);
 		clone = kmemdup(acl, size, flags);
 		if (clone)
-			base_acl_init(&clone->a_base);
+			refcount_set(&clone->a_refcount, 1);
 	}
 	return clone;
 }
@@ -350,7 +350,7 @@ posix_acl_permission(struct inode *inode, const struct posix_acl *acl, int want)
 	const struct posix_acl_entry *pa, *pe, *mask_obj;
 	int found = 0;
 
-	want &= MAY_READ | MAY_WRITE | MAY_EXEC | MAY_NOT_BLOCK;
+	want &= MAY_READ | MAY_WRITE | MAY_EXEC;
 
 	FOREACH_ACL_ENTRY(pa, acl, pe) {
                 switch(pa->e_tag) {
@@ -420,7 +420,7 @@ static int posix_acl_create_masq(struct posix_acl *acl, umode_t *mode_p)
 	umode_t mode = *mode_p;
 	int not_equiv = 0;
 
-	/* assert(base_acl_refcount(&acl->a_base) == 1); */
+	/* assert(atomic_read(acl->a_refcount) == 1); */
 
 	FOREACH_ACL_ENTRY(pa, acl, pe) {
                 switch(pa->e_tag) {
@@ -475,7 +475,7 @@ static int __posix_acl_chmod_masq(struct posix_acl *acl, umode_t mode)
 	struct posix_acl_entry *group_obj = NULL, *mask_obj = NULL;
 	struct posix_acl_entry *pa, *pe;
 
-	/* assert(base_acl_refcount(&acl->a_base) == 1); */
+	/* assert(atomic_read(acl->a_refcount) == 1); */
 
 	FOREACH_ACL_ENTRY(pa, acl, pe) {
 		switch(pa->e_tag) {
@@ -631,12 +631,15 @@ EXPORT_SYMBOL_GPL(posix_acl_create);
 
 /**
  * posix_acl_update_mode  -  update mode in set_acl
+ * @inode: target inode
+ * @mode_p: mode (pointer) for update
+ * @acl: acl pointer
  *
  * Update the file mode when setting an ACL: compute the new file permission
  * bits based on the ACL.  In addition, if the ACL is equivalent to the new
- * file mode, set *acl to NULL to indicate that no ACL should be set.
+ * file mode, set *@acl to NULL to indicate that no ACL should be set.
  *
- * As with chmod, clear the setgit bit if the caller is not in the owning group
+ * As with chmod, clear the setgid bit if the caller is not in the owning group
  * or capable of CAP_FSETID (see inode_change_ok).
  *
  * Called from set_acl inode operations.
@@ -832,7 +835,7 @@ EXPORT_SYMBOL (posix_acl_to_xattr);
 static int
 posix_acl_xattr_get(const struct xattr_handler *handler,
 		    struct dentry *unused, struct inode *inode,
-		    const char *name, void *value, size_t size)
+		    const char *name, void *value, size_t size, int flags)
 {
 	struct posix_acl *acl;
 	int error;

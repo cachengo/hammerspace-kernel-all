@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/fs/nfs/read.c
  *
@@ -26,7 +27,6 @@
 #include "fscache.h"
 #include "pnfs.h"
 #include "nfstrace.h"
-#include "delegation.h"
 
 #define NFSDBG_FACILITY		NFSDBG_PAGECACHE
 
@@ -140,7 +140,6 @@ int nfs_readpage_async(struct nfs_open_context *ctx, struct inode *inode,
 		nfs_readpage_release(new, pgio.pg_error);
 	}
 	nfs_pageio_complete(&pgio);
-	nfs_update_delegated_atime(inode);
 
 	/* It doesn't make sense to do mirrored reads! */
 	WARN_ON_ONCE(pgio.pg_mirror_count != 1);
@@ -251,7 +250,7 @@ static int nfs_readpage_done(struct rpc_task *task,
 	trace_nfs_readpage_done(task, hdr);
 
 	if (task->tk_status == -ESTALE) {
-		set_bit(NFS_INO_STALE, &NFS_I(inode)->flags);
+		nfs_set_inode_stale(inode);
 		nfs_mark_for_revalidate(inode);
 	}
 	return 0;
@@ -265,24 +264,20 @@ static void nfs_readpage_retry(struct rpc_task *task,
 
 	/* This is a short read! */
 	nfs_inc_stats(hdr->inode, NFSIOS_SHORTREAD);
+	trace_nfs_readpage_short(task, hdr);
+
 	/* Has the server at least made some progress? */
 	if (resp->count == 0) {
-		static unsigned long    complain;
-
-		if (time_before(complain, jiffies)) {
-			printk(KERN_WARNING
-			       "NFS: Server read zero bytes, expected %u.\n",
-			       argp->count);
-			complain = jiffies + 300 * HZ;
-		}
 		nfs_set_pgio_error(hdr, -EIO, argp->offset);
 		return;
 	}
-	/* tk_ops == NULL means local IO, and we've made some
-	 * progress. Just return short read for local IO.
-	 */
-	if (task->tk_ops == NULL)
+
+	/* For non rpc-based layout drivers, retry-through-MDS */
+	if (!task->tk_ops) {
+		hdr->pnfs_error = -EAGAIN;
 		return;
+	}
+
 	/* Yes, so retry the read at the end of the hdr */
 	hdr->mds_offset += resp->count;
 	argp->offset += resp->count;
@@ -450,7 +445,6 @@ int nfs_readpages(struct file *filp, struct address_space *mapping,
 
 	ret = read_cache_pages(mapping, pages, readpage_async_filler, &desc);
 	nfs_pageio_complete(&pgio);
-	nfs_update_delegated_atime(inode);
 
 	/* It doesn't make sense to do mirrored reads! */
 	WARN_ON_ONCE(pgio.pg_mirror_count != 1);

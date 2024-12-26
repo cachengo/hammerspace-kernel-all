@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/net/sunrpc/auth.c
  *
@@ -80,7 +81,7 @@ static int param_get_hashtbl_sz(char *buffer, const struct kernel_param *kp)
 	unsigned int nbits;
 
 	nbits = *(unsigned int *)kp->arg;
-	return sprintf(buffer, "%u", 1U << nbits);
+	return sprintf(buffer, "%u\n", 1U << nbits);
 }
 
 #define param_check_hashtbl_sz(name, p) __param_check(name, p, unsigned int);
@@ -220,55 +221,6 @@ rpcauth_get_gssinfo(rpc_authflavor_t pseudoflavor, struct rpcsec_gss_info *info)
 }
 EXPORT_SYMBOL_GPL(rpcauth_get_gssinfo);
 
-/**
- * rpcauth_list_flavors - discover registered flavors and pseudoflavors
- * @array: array to fill in
- * @size: size of "array"
- *
- * Returns the number of array items filled in, or a negative errno.
- *
- * The returned array is not sorted by any policy.  Callers should not
- * rely on the order of the items in the returned array.
- */
-int
-rpcauth_list_flavors(rpc_authflavor_t *array, int size)
-{
-	const struct rpc_authops *ops;
-	rpc_authflavor_t flavor, pseudos[4];
-	int i, len, result = 0;
-
-	rcu_read_lock();
-	for (flavor = 0; flavor < RPC_AUTH_MAXFLAVOR; flavor++) {
-		ops = rcu_dereference(auth_flavors[flavor]);
-		if (result >= size) {
-			result = -ENOMEM;
-			break;
-		}
-
-		if (ops == NULL)
-			continue;
-		if (ops->list_pseudoflavors == NULL) {
-			array[result++] = ops->au_flavor;
-			continue;
-		}
-		len = ops->list_pseudoflavors(pseudos, ARRAY_SIZE(pseudos));
-		if (len < 0) {
-			result = len;
-			break;
-		}
-		for (i = 0; i < len; i++) {
-			if (result >= size) {
-				result = -ENOMEM;
-				break;
-			}
-			array[result++] = pseudos[i];
-		}
-	}
-	rcu_read_unlock();
-	return result;
-}
-EXPORT_SYMBOL_GPL(rpcauth_list_flavors);
-
 struct rpc_auth *
 rpcauth_create(const struct rpc_auth_create_args *args, struct rpc_clnt *clnt)
 {
@@ -358,22 +310,6 @@ out_nocache:
 	return -ENOMEM;
 }
 EXPORT_SYMBOL_GPL(rpcauth_init_credcache);
-
-bool
-rpcauth_map_to_svc_cred(struct rpc_auth *auth, const struct cred *cred,
-			struct svc_cred *svc)
-{
-	svc->cr_uid = cred->uid;
-	svc->cr_gid = cred->gid;
-	svc->cr_flavor = auth->au_flavor;
-	svc->cr_principal = NULL;
-	svc->cr_gss_mech = NULL;
-	if (cred->group_info)
-		svc->cr_group_info = get_group_info(cred->group_info);
-
-	return true;
-}
-EXPORT_SYMBOL_GPL(rpcauth_map_to_svc_cred);
 
 char *
 rpcauth_stringify_acceptor(struct rpc_cred *cred)
@@ -918,7 +854,6 @@ rpcauth_uptodatecred(struct rpc_task *task)
 	struct rpc_cred *cred = task->tk_rqstp->rq_cred;
 
 	return cred == NULL ||
-		test_bit(RPCAUTH_CRED_INIT, &cred->cr_flags) != 0 ||
 		test_bit(RPCAUTH_CRED_UPTODATE, &cred->cr_flags) != 0;
 }
 

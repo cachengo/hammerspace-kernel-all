@@ -16,6 +16,7 @@
 #include <linux/cdev.h>
 #include <linux/mutex.h>
 #include <linux/videodev2.h>
+#include <linux/android_kabi.h>
 
 #include <media/media-entity.h>
 
@@ -24,7 +25,7 @@
 /**
  * enum vfl_devnode_type - type of V4L2 device node
  *
- * @VFL_TYPE_GRABBER:	for video input/output devices
+ * @VFL_TYPE_VIDEO:	for video input/output devices
  * @VFL_TYPE_VBI:	for vertical blank data (i.e. closed captions, teletext)
  * @VFL_TYPE_RADIO:	for radio tuners
  * @VFL_TYPE_SUBDEV:	for V4L2 subdevices
@@ -33,7 +34,7 @@
  * @VFL_TYPE_MAX:	number of VFL types, must always be last in the enum
  */
 enum vfl_devnode_type {
-	VFL_TYPE_GRABBER	= 0,
+	VFL_TYPE_VIDEO,
 	VFL_TYPE_VBI,
 	VFL_TYPE_RADIO,
 	VFL_TYPE_SUBDEV,
@@ -82,11 +83,18 @@ struct v4l2_ctrl_handler;
  *	but the old crop API will still work as expected in order to preserve
  *	backwards compatibility.
  *	Never set this flag for new drivers.
+ * @V4L2_FL_SUBDEV_RO_DEVNODE:
+ *	indicates that the video device node is registered in read-only mode.
+ *	The flag only applies to device nodes registered for sub-devices, it is
+ *	set by the core when the sub-devices device nodes are registered with
+ *	v4l2_device_register_ro_subdev_nodes() and used by the sub-device ioctl
+ *	handler to restrict access to some ioctl calls.
  */
 enum v4l2_video_device_flags {
 	V4L2_FL_REGISTERED		= 0,
 	V4L2_FL_USES_V4L2_FH		= 1,
 	V4L2_FL_QUIRK_INVERTED_CROP	= 2,
+	V4L2_FL_SUBDEV_RO_DEVNODE	= 3,
 };
 
 /* Priority helper functions */
@@ -204,6 +212,8 @@ struct v4l2_file_operations {
 	int (*mmap) (struct file *, struct vm_area_struct *);
 	int (*open) (struct file *);
 	int (*release) (struct file *);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*
@@ -300,6 +310,9 @@ struct video_device
 	DECLARE_BITMAP(valid_ioctls, BASE_VIDIOC_PRIVATE);
 
 	struct mutex *lock;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
 };
 
 /**

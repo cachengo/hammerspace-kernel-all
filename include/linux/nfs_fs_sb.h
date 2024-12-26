@@ -38,7 +38,6 @@ struct nfs_client {
 #define NFS_CS_RENEWD		3		/* - renewd started */
 #define NFS_CS_STOP_RENEW	4		/* no more state to renew */
 #define NFS_CS_CHECK_LEASE_TIME	5		/* need to check lease time */
-#define NFS_CS_NOXUID		6		/* don't use idmap xuid / xgid */
 	unsigned long		cl_flags;	/* behavior switches */
 #define NFS_CS_NORESVPORT	0		/* - use ephemeral src port */
 #define NFS_CS_DISCRTRY		1		/* - disconnect on RPC retry */
@@ -49,14 +48,12 @@ struct nfs_client {
 #define NFS_CS_NOPING		6		/* - don't ping on connect */
 #define NFS_CS_DS		7		/* - Server is a DS */
 #define NFS_CS_REUSEPORT	8		/* - reuse src port on reconnect */
-#define NFS_CS_LOCAL_IO		9		/* - client is local */
 	struct sockaddr_storage	cl_addr;	/* server identifier */
 	size_t			cl_addrlen;
 	char *			cl_hostname;	/* hostname of server */
 	char *			cl_acceptor;	/* GSSAPI acceptor name */
 	struct list_head	cl_share_link;	/* link in global client list */
 	struct list_head	cl_superblocks;	/* List of nfs_server structs */
-	struct list_head	cl_local_addrs;	/* List of local addresses */
 
 	struct rpc_clnt *	cl_rpcclient;
 	const struct nfs_rpc_ops *rpc_ops;	/* NFS protocol vector */
@@ -129,10 +126,6 @@ struct nfs_client {
 
 	struct net		*cl_net;
 	struct list_head	pending_cb_stateids;
-
-	/* localio */
-	struct timespec64	cl_nfssvc_boot;
-	seqlock_t		cl_boot_lock;
 };
 
 /*
@@ -170,6 +163,11 @@ struct nfs_server {
 	unsigned int		dtsize;		/* readdir size */
 	unsigned short		port;		/* "port=" setting */
 	unsigned int		bsize;		/* server block size */
+#ifdef CONFIG_NFS_V4_2
+	unsigned int		gxasize;	/* getxattr size */
+	unsigned int		sxasize;	/* setxattr size */
+	unsigned int		lxasize;	/* listxattr size */
+#endif
 	unsigned int		acregmin;	/* attr cache timeouts */
 	unsigned int		acregmax;
 	unsigned int		acdirmin;
@@ -180,9 +178,6 @@ struct nfs_server {
 #define NFS_OPTION_FSCACHE	0x00000001	/* - local caching enabled */
 #define NFS_OPTION_MIGRATION	0x00000002	/* - NFSv4 migration enabled */
 
-	enum nfs4_change_attr_type
-				change_attr_type;/* Description of change attribute */
-
 	struct nfs_fsid		fsid;
 	__u64			maxfilesize;	/* maximum file size */
 	struct timespec64	time_delta;	/* smallest time granularity */
@@ -190,8 +185,6 @@ struct nfs_server {
 	struct super_block	*super;		/* VFS super block */
 	dev_t			s_dev;		/* superblock dev numbers */
 	struct nfs_auth_info	auth_info;	/* parsed auth flavors */
-
-	__u64			fattr_valid;	/* Valid attributes */
 
 #ifdef CONFIG_NFS_FSCACHE
 	struct nfs_fscache_key	*fscache_key;	/* unique key for superblock */
@@ -271,9 +264,14 @@ struct nfs_server {
 #define NFS_CAP_ATOMIC_OPEN	(1U << 4)
 /* #define NFS_CAP_CHANGE_ATTR	(1U << 5) */
 #define NFS_CAP_LGOPEN		(1U << 5)
-#define NFS_CAP_CASE_INSENSITIVE	(1U << 6)
-#define NFS_CAP_DELEGTIME	(1U << 7)
-#define NFS_CAP_OPEN_XOR	(1U << 8)
+#define NFS_CAP_FILEID		(1U << 6)
+#define NFS_CAP_MODE		(1U << 7)
+#define NFS_CAP_NLINK		(1U << 8)
+#define NFS_CAP_OWNER		(1U << 9)
+#define NFS_CAP_OWNER_GROUP	(1U << 10)
+#define NFS_CAP_ATIME		(1U << 11)
+#define NFS_CAP_CTIME		(1U << 12)
+#define NFS_CAP_MTIME		(1U << 13)
 #define NFS_CAP_POSIX_LOCK	(1U << 14)
 #define NFS_CAP_UIDGID_NOMAP	(1U << 15)
 #define NFS_CAP_STATEID_NFSV41	(1U << 16)
@@ -287,7 +285,8 @@ struct nfs_server {
 #define NFS_CAP_COPY		(1U << 24)
 #define NFS_CAP_OFFLOAD_CANCEL	(1U << 25)
 #define NFS_CAP_LAYOUTERROR	(1U << 26)
-#define NFS_CAP_ALLOW_ACLS	(1U << 27)
-#define NFS_CAP_DENY_ACLS	(1U << 28)
+#define NFS_CAP_COPY_NOTIFY	(1U << 27)
+#define NFS_CAP_XATTR		(1U << 28)
+#define NFS_CAP_READ_PLUS	(1U << 29)
 
 #endif

@@ -187,7 +187,7 @@ static int filelayout_async_handle_error(struct rpc_task *task,
 		pnfs_error_mark_layout_for_return(inode, lseg);
 		pnfs_set_lo_fail(lseg);
 		rpc_wake_up(&tbl->slot_tbl_waitq);
-		/* fall through */
+		fallthrough;
 	default:
 reset:
 		dprintk("%s Retry through MDS. Error %d\n", __func__,
@@ -447,8 +447,7 @@ static const struct rpc_call_ops filelayout_commit_call_ops = {
 };
 
 static enum pnfs_try_status
-filelayout_read_pagelist(struct nfs_pageio_descriptor *desc,
-			 struct nfs_pgio_header *hdr)
+filelayout_read_pagelist(struct nfs_pgio_header *hdr)
 {
 	struct pnfs_layout_segment *lseg = hdr->lseg;
 	struct nfs4_pnfs_ds *ds;
@@ -487,16 +486,15 @@ filelayout_read_pagelist(struct nfs_pageio_descriptor *desc,
 	hdr->mds_offset = offset;
 
 	/* Perform an asynchronous read to ds */
-	nfs_initiate_pgio(desc, ds->ds_clp, ds_clnt, hdr, hdr->cred,
+	nfs_initiate_pgio(ds_clnt, hdr, hdr->cred,
 			  NFS_PROTO(hdr->inode), &filelayout_read_call_ops,
-			  0, RPC_TASK_SOFTCONN, false);
+			  0, RPC_TASK_SOFTCONN);
 	return PNFS_ATTEMPTED;
 }
 
 /* Perform async writes. */
 static enum pnfs_try_status
-filelayout_write_pagelist(struct nfs_pageio_descriptor *desc,
-			  struct nfs_pgio_header *hdr, int sync)
+filelayout_write_pagelist(struct nfs_pgio_header *hdr, int sync)
 {
 	struct pnfs_layout_segment *lseg = hdr->lseg;
 	struct nfs4_pnfs_ds *ds;
@@ -530,9 +528,9 @@ filelayout_write_pagelist(struct nfs_pageio_descriptor *desc,
 	hdr->args.offset = filelayout_get_dserver_offset(lseg, offset);
 
 	/* Perform an asynchronous write */
-	nfs_initiate_pgio(desc, ds->ds_clp, ds_clnt, hdr, hdr->cred,
+	nfs_initiate_pgio(ds_clnt, hdr, hdr->cred,
 			  NFS_PROTO(hdr->inode), &filelayout_write_call_ops,
-			  sync, RPC_TASK_SOFTCONN, false);
+			  sync, RPC_TASK_SOFTCONN);
 	return PNFS_ATTEMPTED;
 }
 
@@ -1004,10 +1002,9 @@ static int filelayout_initiate_commit(struct nfs_commit_data *data, int how)
 	fh = select_ds_fh_from_commit(lseg, data->ds_commit_index);
 	if (fh)
 		data->args.fh = fh;
-	return nfs_initiate_commit(ds->ds_clp, ds_clnt, data,
-				   NFS_PROTO(data->inode),
+	return nfs_initiate_commit(ds_clnt, data, NFS_PROTO(data->inode),
 				   &filelayout_commit_call_ops, how,
-				   RPC_TASK_SOFTCONN, false);
+				   RPC_TASK_SOFTCONN);
 out_err:
 	pnfs_generic_prepare_to_resend_writes(data);
 	pnfs_generic_commit_release(data);
@@ -1048,7 +1045,7 @@ filelayout_alloc_layout_hdr(struct inode *inode, gfp_t gfp_flags)
 	flo = kzalloc(sizeof(*flo), gfp_flags);
 	if (flo == NULL)
 		return NULL;
-	INIT_LIST_HEAD(&flo->commit_info.commits);
+	pnfs_init_ds_commit_info(&flo->commit_info);
 	flo->commit_info.ops = &filelayout_commit_ops;
 	return &flo->generic_hdr;
 }
@@ -1114,6 +1111,7 @@ static struct pnfs_layoutdriver_type filelayout_type = {
 	.id			= LAYOUT_NFSV4_1_FILES,
 	.name			= "LAYOUT_NFSV4_1_FILES",
 	.owner			= THIS_MODULE,
+	.flags			= PNFS_LAYOUTGET_ON_OPEN,
 	.max_layoutget_response	= 4096, /* 1 page or so... */
 	.alloc_layout_hdr	= filelayout_alloc_layout_hdr,
 	.free_layout_hdr	= filelayout_free_layout_hdr,

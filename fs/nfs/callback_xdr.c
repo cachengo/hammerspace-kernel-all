@@ -18,15 +18,15 @@
 #include "callback.h"
 #include "internal.h"
 #include "nfs4session.h"
+#include "nfs4trace.h"
 
 #define CB_OP_TAGLEN_MAXSZ		(512)
 #define CB_OP_HDR_RES_MAXSZ		(2 * 4) // opcode, status
 #define CB_OP_GETATTR_BITMAP_MAXSZ	(4 * 4) // bitmap length, 3 bitmaps
 #define CB_OP_GETATTR_RES_MAXSZ		(CB_OP_HDR_RES_MAXSZ + \
 					 CB_OP_GETATTR_BITMAP_MAXSZ + \
-					 /* change, size, atime, ctime,
-					  * mtime, deleg_atime, deleg_mtime */\
-					 (2 + 2 + 3 + 3 + 3 + 3 + 3) * 4)
+					 /* change, size, ctime, mtime */\
+					 (2 + 2 + 3 + 3) * 4)
 #define CB_OP_RECALL_RES_MAXSZ		(CB_OP_HDR_RES_MAXSZ)
 
 #if defined(CONFIG_NFS_V4_1)
@@ -640,13 +640,6 @@ static __be32 encode_attr_time(struct xdr_stream *xdr, const struct timespec64 *
 	return 0;
 }
 
-static __be32 encode_attr_atime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
-{
-	if (!(bitmap[1] & FATTR4_WORD1_TIME_ACCESS))
-		return 0;
-	return encode_attr_time(xdr,time);
-}
-
 static __be32 encode_attr_ctime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
 {
 	if (!(bitmap[1] & FATTR4_WORD1_TIME_METADATA))
@@ -657,20 +650,6 @@ static __be32 encode_attr_ctime(struct xdr_stream *xdr, const uint32_t *bitmap, 
 static __be32 encode_attr_mtime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
 {
 	if (!(bitmap[1] & FATTR4_WORD1_TIME_MODIFY))
-		return 0;
-	return encode_attr_time(xdr,time);
-}
-
-static __be32 encode_attr_delegatime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
-{
-	if (!(bitmap[2] & FATTR4_WORD2_TIME_DELEG_ACCESS))
-		return 0;
-	return encode_attr_time(xdr,time);
-}
-
-static __be32 encode_attr_delegmtime(struct xdr_stream *xdr, const uint32_t *bitmap, const struct timespec64 *time)
-{
-	if (!(bitmap[2] & FATTR4_WORD2_TIME_DELEG_MODIFY))
 		return 0;
 	return encode_attr_time(xdr,time);
 }
@@ -725,19 +704,10 @@ static __be32 encode_getattr_res(struct svc_rqst *rqstp, struct xdr_stream *xdr,
 	status = encode_attr_size(xdr, res->bitmap, res->size);
 	if (unlikely(status != 0))
 		goto out;
-	status = encode_attr_atime(xdr, res->bitmap, &res->atime);
-	if (unlikely(status != 0))
-		goto out;
 	status = encode_attr_ctime(xdr, res->bitmap, &res->ctime);
 	if (unlikely(status != 0))
 		goto out;
 	status = encode_attr_mtime(xdr, res->bitmap, &res->mtime);
-	if (unlikely(status != 0))
-		goto out;
-	status = encode_attr_delegatime(xdr, res->bitmap, &res->atime);
-	if (unlikely(status != 0))
-		goto out;
-	status = encode_attr_delegmtime(xdr, res->bitmap, &res->mtime);
 	*savep = htonl((unsigned int)((char *)xdr->p - (char *)(savep+1)));
 out:
 	return status;
@@ -977,9 +947,13 @@ static __be32 nfs4_callback_compound(struct svc_rqst *rqstp)
 
 	if (hdr_arg.minorversion == 0) {
 		cps.clp = nfs4_find_client_ident(SVC_NET(rqstp), hdr_arg.cb_ident);
-		if (!cps.clp || !check_gss_callback_principal(cps.clp, rqstp)) {
-			if (cps.clp)
-				nfs_put_client(cps.clp);
+		if (!cps.clp) {
+			trace_nfs_cb_no_clp(rqstp->rq_xid, hdr_arg.cb_ident);
+			goto out_invalidcred;
+		}
+		if (!check_gss_callback_principal(cps.clp, rqstp)) {
+			trace_nfs_cb_badprinc(rqstp->rq_xid, hdr_arg.cb_ident);
+			nfs_put_client(cps.clp);
 			goto out_invalidcred;
 		}
 	}

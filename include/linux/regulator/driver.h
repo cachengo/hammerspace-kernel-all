@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * driver.h -- SoC Regulator driver support.
  *
@@ -5,22 +6,18 @@
  *
  * Author: Liam Girdwood <lrg@slimlogic.co.uk>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  * Regulator Driver Interface.
  */
 
 #ifndef __LINUX_REGULATOR_DRIVER_H_
 #define __LINUX_REGULATOR_DRIVER_H_
 
-#define MAX_COUPLED		2
-
 #include <linux/device.h>
+#include <linux/linear_range.h>
 #include <linux/notifier.h>
 #include <linux/regulator/consumer.h>
 #include <linux/ww_mutex.h>
+#include <linux/android_kabi.h>
 
 struct gpio_desc;
 struct regmap;
@@ -44,31 +41,13 @@ enum regulator_status {
 	REGULATOR_STATUS_UNDEFINED,
 };
 
-/**
- * struct regulator_linear_range - specify linear voltage ranges
- *
- * Specify a range of voltages for regulator_map_linear_range() and
- * regulator_list_linear_range().
- *
- * @min_uV:  Lowest voltage in range
- * @min_sel: Lowest selector for range
- * @max_sel: Highest selector for range
- * @uV_step: Step size
- */
-struct regulator_linear_range {
-	unsigned int min_uV;
-	unsigned int min_sel;
-	unsigned int max_sel;
-	unsigned int uV_step;
-};
-
-/* Initialize struct regulator_linear_range */
+/* Initialize struct linear_range for regulators */
 #define REGULATOR_LINEAR_RANGE(_min_uV, _min_sel, _max_sel, _step_uV)	\
 {									\
-	.min_uV		= _min_uV,					\
+	.min		= _min_uV,					\
 	.min_sel	= _min_sel,					\
 	.max_sel	= _max_sel,					\
-	.uV_step	= _step_uV,					\
+	.step		= _step_uV,					\
 }
 
 /**
@@ -139,7 +118,7 @@ struct regulator_linear_range {
  *                       suspended.
  * @set_suspend_mode: Set the operating mode for the regulator when the
  *                    system is suspended.
- *
+ * @resume: Resume operation of suspended regulator.
  * @set_pull_down: Configure the regulator to pull down when the regulator
  *		   is disabled.
  *
@@ -224,6 +203,8 @@ struct regulator_ops {
 	int (*resume)(struct regulator_dev *rdev);
 
 	int (*set_pull_down) (struct regulator_dev *);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*
@@ -245,6 +226,8 @@ enum regulator_type {
  * @name: Identifying name for the regulator.
  * @supply_name: Identifying the regulator supply
  * @of_match: Name used to identify regulator in DT.
+ * @of_match_full_name: A flag to indicate that the of_match string, if
+ *			present, should be matched against the node full_name.
  * @regulators_node: Name of node containing regulator definitions in DT.
  * @of_parse_cb: Optional callback called only if of_match is present.
  *               Will be called for each regulator parsed from DT, during
@@ -282,10 +265,15 @@ enum regulator_type {
  * @curr_table: Current limit mapping table (if table based mapping)
  *
  * @vsel_range_reg: Register for range selector when using pickable ranges
- *		    and regulator_regmap_X_voltage_X_pickable functions.
+ *		    and ``regulator_map_*_voltage_*_pickable`` functions.
  * @vsel_range_mask: Mask for register bitfield used for range selector
- * @vsel_reg: Register for selector when using regulator_regmap_X_voltage_
+ * @vsel_reg: Register for selector when using ``regulator_map_*_voltage_*``
  * @vsel_mask: Mask for register bitfield used for selector
+ * @vsel_step: Specify the resolution of selector stepping when setting
+ *	       voltage. If 0, then no stepping is done (requested selector is
+ *	       set directly), if >0 then the regulator API will ramp the
+ *	       voltage up/down gradually each time increasing/decreasing the
+ *	       selector by the specified step value.
  * @csel_reg: Register for current limit selector using regmap set_current_limit
  * @csel_mask: Mask for register bitfield used for current limit selector
  * @apply_reg: Register for initiate voltage change on the output when
@@ -322,12 +310,16 @@ enum regulator_type {
  * @enable_time: Time taken for initial enable of regulator (in uS).
  * @off_on_delay: guard time (in uS), before re-enabling a regulator
  *
+ * @poll_enabled_time: The polling interval (in uS) to use while checking that
+ *                     the regulator was actually enabled. Max upto enable_time.
+ *
  * @of_map_mode: Maps a hardware mode defined in a DeviceTree to a standard mode
  */
 struct regulator_desc {
 	const char *name;
 	const char *supply_name;
 	const char *of_match;
+	bool of_match_full_name;
 	const char *regulators_node;
 	int (*of_parse_cb)(struct device_node *,
 			    const struct regulator_desc *,
@@ -348,7 +340,7 @@ struct regulator_desc {
 	unsigned int ramp_delay;
 	int min_dropout_uV;
 
-	const struct regulator_linear_range *linear_ranges;
+	const struct linear_range *linear_ranges;
 	const unsigned int *linear_range_selectors;
 
 	int n_linear_ranges;
@@ -360,6 +352,7 @@ struct regulator_desc {
 	unsigned int vsel_range_mask;
 	unsigned int vsel_reg;
 	unsigned int vsel_mask;
+	unsigned int vsel_step;
 	unsigned int csel_reg;
 	unsigned int csel_mask;
 	unsigned int apply_reg;
@@ -388,7 +381,11 @@ struct regulator_desc {
 
 	unsigned int off_on_delay;
 
+	unsigned int poll_enabled_time;
+
 	unsigned int (*of_map_mode)(unsigned int mode);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -426,7 +423,8 @@ struct regulator_config {
  * incremented.
  */
 struct coupling_desc {
-	struct regulator_dev *coupled_rdevs[MAX_COUPLED];
+	struct regulator_dev **coupled_rdevs;
+	struct regulator_coupler *coupler;
 	int n_resolved;
 	int n_coupled;
 };
@@ -480,6 +478,8 @@ struct regulator_dev {
 
 	/* time when this regulator was disabled last time */
 	unsigned long last_off_jiffy;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 struct regulator_dev *
@@ -543,13 +543,11 @@ int regulator_set_current_limit_regmap(struct regulator_dev *rdev,
 int regulator_get_current_limit_regmap(struct regulator_dev *rdev);
 void *regulator_get_init_drvdata(struct regulator_init_data *reg_init_data);
 
-void regulator_lock(struct regulator_dev *rdev);
-void regulator_unlock(struct regulator_dev *rdev);
-
 /*
  * Helper functions intended to be used by regulator drivers prior registering
  * their regulators.
  */
 int regulator_desc_list_voltage_linear_range(const struct regulator_desc *desc,
 					     unsigned int selector);
+
 #endif

@@ -227,8 +227,6 @@ nfs_complete_unlink(struct dentry *dentry, struct inode *inode)
 	dentry->d_fsdata = NULL;
 	spin_unlock(&dentry->d_lock);
 
-	NFS_PROTO(inode)->return_delegation(inode);
-
 	if (NFS_STALE(inode) || !nfs_call_unlink(dentry, inode, data))
 		nfs_free_unlinkdata(data);
 }
@@ -398,12 +396,6 @@ nfs_complete_sillyrename(struct rpc_task *task, struct nfs_renamedata *data)
 		nfs_cancel_async_unlink(dentry);
 		return;
 	}
-
-	/*
-	 * vfs_unlink and the like do not issue this when a file is
-	 * sillyrenamed, so do it here.
-	 */
-	fsnotify_nameremove(dentry, 0);
 }
 
 #define SILLYNAME_PREFIX ".nfs"
@@ -505,13 +497,12 @@ nfs_sillyrename(struct inode *dir, struct dentry *dentry)
 	switch (error) {
 	case 0:
 		/* The rename succeeded */
-		nfs_d_revalidate_case_insensitive(dir);
 		nfs_set_verifier(dentry, nfs_save_change_attribute(dir));
 		spin_lock(&inode->i_lock);
 		NFS_I(inode)->attr_gencount = nfs_inc_attr_generation_counter();
-		nfs_set_cache_invalid(inode, NFS_INO_INVALID_CHANGE |
-						     NFS_INO_INVALID_CTIME |
-						     NFS_INO_REVAL_FORCED);
+		NFS_I(inode)->cache_validity |= NFS_INO_INVALID_CHANGE
+			| NFS_INO_INVALID_CTIME
+			| NFS_INO_REVAL_FORCED;
 		spin_unlock(&inode->i_lock);
 		d_move(dentry, sdentry);
 		break;

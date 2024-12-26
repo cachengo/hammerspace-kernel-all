@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  linux/drivers/mmc/core/sdio_io.c
  *
  *  Copyright 2007-2008 Pierre Ossman
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
  */
 
 #include <linux/export.h>
@@ -137,7 +133,7 @@ int sdio_disable_func(struct sdio_func *func)
 
 err:
 	pr_debug("SDIO: Failed to disable device %s\n", sdio_func_id(func));
-	return -EIO;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(sdio_disable_func);
 
@@ -713,6 +709,7 @@ EXPORT_SYMBOL_GPL(sdio_get_host_pm_caps);
 /**
  *	sdio_set_host_pm_flags - set wanted host power management capabilities
  *	@func: SDIO function attached to host
+ *	@flags: Power Management flags to set
  *
  *	Set a capability bitmask corresponding to wanted host controller
  *	power management features for the upcoming suspend state.

@@ -1,15 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2012 Google, Inc.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #undef TRACE_SYSTEM
@@ -84,6 +75,30 @@ DEFINE_EVENT(binder_function_return_class, name,	\
 DEFINE_BINDER_FUNCTION_RETURN_EVENT(binder_ioctl_done);
 DEFINE_BINDER_FUNCTION_RETURN_EVENT(binder_write_done);
 DEFINE_BINDER_FUNCTION_RETURN_EVENT(binder_read_done);
+
+TRACE_EVENT(binder_set_priority,
+	TP_PROTO(int proc, int thread, unsigned int old_prio,
+		 unsigned int desired_prio, unsigned int new_prio),
+	TP_ARGS(proc, thread, old_prio, new_prio, desired_prio),
+
+	TP_STRUCT__entry(
+		__field(int, proc)
+		__field(int, thread)
+		__field(unsigned int, old_prio)
+		__field(unsigned int, new_prio)
+		__field(unsigned int, desired_prio)
+	),
+	TP_fast_assign(
+		__entry->proc = proc;
+		__entry->thread = thread;
+		__entry->old_prio = old_prio;
+		__entry->new_prio = new_prio;
+		__entry->desired_prio = desired_prio;
+	),
+	TP_printk("proc=%d thread=%d old=%d => new=%d desired=%d",
+		  __entry->proc, __entry->thread, __entry->old_prio,
+		  __entry->new_prio, __entry->desired_prio)
+);
 
 TRACE_EVENT(binder_wait_for_work,
 	TP_PROTO(bool proc_work, bool transaction_stack, bool thread_todo),

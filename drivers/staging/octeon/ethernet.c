@@ -13,29 +13,20 @@
 #include <linux/phy.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
+#include <linux/of_mdio.h>
 #include <linux/of_net.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
 
 #include <net/dst.h>
 
-#include <asm/octeon/octeon.h>
-
-#include "ethernet-defines.h"
 #include "octeon-ethernet.h"
+#include "ethernet-defines.h"
 #include "ethernet-mem.h"
 #include "ethernet-rx.h"
 #include "ethernet-tx.h"
 #include "ethernet-mdio.h"
 #include "ethernet-util.h"
-
-#include <asm/octeon/cvmx-pip.h>
-#include <asm/octeon/cvmx-pko.h>
-#include <asm/octeon/cvmx-fau.h>
-#include <asm/octeon/cvmx-ipd.h>
-#include <asm/octeon/cvmx-helper.h>
-#include <asm/octeon/cvmx-asxx-defs.h>
-#include <asm/octeon/cvmx-gmxx-defs.h>
 
 #define OCTEON_MAX_MTU 65392
 
@@ -182,7 +173,7 @@ static void cvm_oct_configure_common_hw(void)
  */
 int cvm_oct_free_work(void *work_queue_entry)
 {
-	cvmx_wqe_t *work = work_queue_entry;
+	struct cvmx_wqe *work = work_queue_entry;
 
 	int segments = work->word2.s.bufs;
 	union cvmx_buf_ptr segment_ptr = work->packet_ptr;
@@ -421,7 +412,7 @@ int cvm_oct_common_init(struct net_device *dev)
 	if (priv->of_node)
 		mac = of_get_mac_address(priv->of_node);
 
-	if (mac)
+	if (!IS_ERR_OR_NULL(mac))
 		ether_addr_copy(dev->dev_addr, mac);
 	else
 		eth_hw_addr_random(dev);
@@ -470,7 +461,7 @@ int cvm_oct_common_open(struct net_device *dev,
 	struct octeon_ethernet *priv = netdev_priv(dev);
 	int interface = INTERFACE(priv->port);
 	int index = INDEX(priv->port);
-	cvmx_helper_link_info_t link_info;
+	union cvmx_helper_link_info link_info;
 	int rv;
 
 	rv = cvm_oct_phy_setup_device(dev);
@@ -506,7 +497,7 @@ int cvm_oct_common_open(struct net_device *dev,
 void cvm_oct_link_poll(struct net_device *dev)
 {
 	struct octeon_ethernet *priv = netdev_priv(dev);
-	cvmx_helper_link_info_t link_info;
+	union cvmx_helper_link_info link_info;
 
 	link_info = cvmx_helper_link_get(priv->port);
 	if (link_info.u64 == priv->link_info)
@@ -699,8 +690,6 @@ static int cvm_oct_probe(struct platform_device *pdev)
 	mtu_overhead += VLAN_HLEN;
 #endif
 
-	octeon_mdiobus_force_mod_depencency();
-
 	pip = pdev->dev.of_node;
 	if (!pip) {
 		pr_err("Error: No 'pip' in /aliases\n");
@@ -794,7 +783,7 @@ static int cvm_oct_probe(struct platform_device *pdev)
 			priv->imode = CVMX_HELPER_INTERFACE_MODE_DISABLED;
 			priv->port = CVMX_PIP_NUM_INPUT_PORTS;
 			priv->queue = -1;
-			strcpy(dev->name, "pow%d");
+			strscpy(dev->name, "pow%d", sizeof(dev->name));
 			for (qos = 0; qos < 16; qos++)
 				skb_queue_head_init(&priv->tx_free_list[qos]);
 			dev->min_mtu = VLAN_ETH_ZLEN - mtu_overhead;
@@ -866,42 +855,50 @@ static int cvm_oct_probe(struct platform_device *pdev)
 
 			case CVMX_HELPER_INTERFACE_MODE_NPI:
 				dev->netdev_ops = &cvm_oct_npi_netdev_ops;
-				strcpy(dev->name, "npi%d");
+				strscpy(dev->name, "npi%d", sizeof(dev->name));
 				break;
 
 			case CVMX_HELPER_INTERFACE_MODE_XAUI:
 				dev->netdev_ops = &cvm_oct_xaui_netdev_ops;
-				strcpy(dev->name, "xaui%d");
+				strscpy(dev->name, "xaui%d", sizeof(dev->name));
 				break;
 
 			case CVMX_HELPER_INTERFACE_MODE_LOOP:
 				dev->netdev_ops = &cvm_oct_npi_netdev_ops;
-				strcpy(dev->name, "loop%d");
+				strscpy(dev->name, "loop%d", sizeof(dev->name));
 				break;
 
 			case CVMX_HELPER_INTERFACE_MODE_SGMII:
 				priv->phy_mode = PHY_INTERFACE_MODE_SGMII;
 				dev->netdev_ops = &cvm_oct_sgmii_netdev_ops;
-				strcpy(dev->name, "eth%d");
+				strscpy(dev->name, "eth%d", sizeof(dev->name));
 				break;
 
 			case CVMX_HELPER_INTERFACE_MODE_SPI:
 				dev->netdev_ops = &cvm_oct_spi_netdev_ops;
-				strcpy(dev->name, "spi%d");
+				strscpy(dev->name, "spi%d", sizeof(dev->name));
 				break;
 
 			case CVMX_HELPER_INTERFACE_MODE_GMII:
 				priv->phy_mode = PHY_INTERFACE_MODE_GMII;
 				dev->netdev_ops = &cvm_oct_rgmii_netdev_ops;
-				strcpy(dev->name, "eth%d");
+				strscpy(dev->name, "eth%d", sizeof(dev->name));
 				break;
 
 			case CVMX_HELPER_INTERFACE_MODE_RGMII:
 				dev->netdev_ops = &cvm_oct_rgmii_netdev_ops;
-				strcpy(dev->name, "eth%d");
+				strscpy(dev->name, "eth%d", sizeof(dev->name));
 				cvm_set_rgmii_delay(priv, interface,
 						    port_index);
 				break;
+			}
+
+			if (priv->of_node && of_phy_is_fixed_link(priv->of_node)) {
+				if (of_phy_register_fixed_link(priv->of_node)) {
+					netdev_err(dev, "Failed to register fixed link for interface %d, port %d\n",
+						   interface, priv->port);
+					dev->netdev_ops = NULL;
+				}
 			}
 
 			if (!dev->netdev_ops) {
@@ -997,6 +994,7 @@ static struct platform_driver cvm_oct_driver = {
 
 module_platform_driver(cvm_oct_driver);
 
+MODULE_SOFTDEP("pre: mdio-cavium");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Cavium Networks <support@caviumnetworks.com>");
 MODULE_DESCRIPTION("Cavium Networks Octeon ethernet driver.");

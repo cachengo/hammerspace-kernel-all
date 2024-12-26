@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * rt5651.c  --  RT5651 ALSA SoC audio codec driver
  *
  * Copyright 2014 Realtek Semiconductor Corp.
  * Author: Bard Liao <bardliao@realtek.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -27,6 +24,9 @@
 #include <sound/initval.h>
 #include <sound/tlv.h>
 #include <sound/jack.h>
+#include <linux/of_gpio.h>
+#include <linux/gpio.h>
+#include <linux/clk.h>
 
 #include "rl6231.h"
 #include "rt5651.h"
@@ -287,10 +287,44 @@ static bool rt5651_readable_register(struct device *dev, unsigned int reg)
 	}
 }
 
+static int rt5651_asrc_get(struct snd_kcontrol *kcontrol,
+			   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct rt5651_priv *rt5651 = snd_soc_component_get_drvdata(component);
+
+	ucontrol->value.integer.value[0] = rt5651->asrc_en;
+
+	return 0;
+}
+
+static int rt5651_asrc_put(struct snd_kcontrol *kcontrol,
+			   struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
+	struct rt5651_priv *rt5651 = snd_soc_component_get_drvdata(component);
+
+	rt5651->asrc_en = ucontrol->value.integer.value[0];
+	if (rt5651->asrc_en) {
+		regmap_write(rt5651->regmap, 0x80, 0x4000);
+		regmap_write(rt5651->regmap, 0x81, 0x0302);
+		regmap_write(rt5651->regmap, 0x82, 0x0800);
+		regmap_write(rt5651->regmap, 0x73, 0x1004);
+		regmap_write(rt5651->regmap, 0x83, 0x1000);
+		regmap_write(rt5651->regmap, 0x84, 0x7000);
+		snd_soc_component_update_bits(component, 0x64, 0x0200, 0x0200);
+		snd_soc_component_update_bits(component, RT5651_D_MISC, 0xc00, 0xc00);
+	} else {
+		regmap_write(rt5651->regmap, 0x83, 0x0);
+		regmap_write(rt5651->regmap, 0x84, 0x0);
+	}
+	return 0;
+}
+
 static const DECLARE_TLV_DB_SCALE(out_vol_tlv, -4650, 150, 0);
-static const DECLARE_TLV_DB_SCALE(dac_vol_tlv, -65625, 375, 0);
+static const DECLARE_TLV_DB_MINMAX(dac_vol_tlv, -6562, 0);
 static const DECLARE_TLV_DB_SCALE(in_vol_tlv, -3450, 150, 0);
-static const DECLARE_TLV_DB_SCALE(adc_vol_tlv, -17625, 375, 0);
+static const DECLARE_TLV_DB_MINMAX(adc_vol_tlv, -1762, 3000);
 static const DECLARE_TLV_DB_SCALE(adc_bst_tlv, 0, 1200, 0);
 
 /* {0, +20, +24, +30, +35, +40, +44, +50, +52} dB */
@@ -313,6 +347,10 @@ static SOC_ENUM_SINGLE_DECL(rt5651_if2_dac_enum, RT5651_DIG_INF_DATA,
 
 static SOC_ENUM_SINGLE_DECL(rt5651_if2_adc_enum, RT5651_DIG_INF_DATA,
 				RT5651_IF2_ADC_SEL_SFT, rt5651_data_select);
+
+static const char * const rt5651_asrc_mode[] = {"Disable", "Enable"};
+
+static SOC_ENUM_SINGLE_DECL(rt5651_asrc_enum, 0, 0, rt5651_asrc_mode);
 
 static const struct snd_kcontrol_new rt5651_snd_controls[] = {
 	/* Headphone Output Volume */
@@ -356,6 +394,9 @@ static const struct snd_kcontrol_new rt5651_snd_controls[] = {
 			RT5651_ADC_L_BST_SFT, RT5651_ADC_R_BST_SFT,
 			3, 0, adc_bst_tlv),
 
+	/* RT5651 ASRC Switch */
+	SOC_ENUM_EXT("RT5651 ASRC Switch", rt5651_asrc_enum,
+		     rt5651_asrc_get, rt5651_asrc_put),
 	/* ASRC */
 	SOC_SINGLE("IF1 ASRC Switch", RT5651_PLL_MODE_1,
 		RT5651_STO1_T_SFT, 1, 0),
@@ -1514,10 +1555,14 @@ static int rt5651_set_dai_pll(struct snd_soc_dai *dai, int pll_id, int source,
 static int rt5651_set_bias_level(struct snd_soc_component *component,
 			enum snd_soc_bias_level level)
 {
+	struct rt5651_priv *rt5651 = snd_soc_component_get_drvdata(component);
+
 	switch (level) {
 	case SND_SOC_BIAS_PREPARE:
 		if (SND_SOC_BIAS_STANDBY == snd_soc_component_get_bias_level(component)) {
-			if (snd_soc_component_read32(component, RT5651_PLL_MODE_1) & 0x9200)
+			if (!IS_ERR(rt5651->mclk))
+				clk_prepare_enable(rt5651->mclk);
+			if (snd_soc_component_read(component, RT5651_PLL_MODE_1) & 0x9200)
 				snd_soc_component_update_bits(component, RT5651_D_MISC,
 						    0xc00, 0xc00);
 		}
@@ -1534,6 +1579,9 @@ static int rt5651_set_bias_level(struct snd_soc_component *component,
 				RT5651_PWR_FV1 | RT5651_PWR_FV2,
 				RT5651_PWR_FV1 | RT5651_PWR_FV2);
 			snd_soc_component_update_bits(component, RT5651_D_MISC, 0x1, 0x1);
+		} else if (SND_SOC_BIAS_PREPARE == snd_soc_component_get_bias_level(component)) {
+			if (!IS_ERR(rt5651->mclk))
+				clk_disable_unprepare(rt5651->mclk);
 		}
 		break;
 
@@ -1611,7 +1659,7 @@ static bool rt5651_micbias1_ovcd(struct snd_soc_component *component)
 {
 	int val;
 
-	val = snd_soc_component_read32(component, RT5651_IRQ_CTRL2);
+	val = snd_soc_component_read(component, RT5651_IRQ_CTRL2);
 	dev_dbg(component->dev, "irq ctrl2 %#04x\n", val);
 
 	return (val & RT5651_MB1_OC_CLR);
@@ -1628,7 +1676,7 @@ static bool rt5651_jack_inserted(struct snd_soc_component *component)
 		return val;
 	}
 
-	val = snd_soc_component_read32(component, RT5651_INT_IRQ_ST);
+	val = snd_soc_component_read(component, RT5651_INT_IRQ_ST);
 	dev_dbg(component->dev, "irq status %#04x\n", val);
 
 	switch (rt5651->jd_src) {
@@ -1645,7 +1693,10 @@ static bool rt5651_jack_inserted(struct snd_soc_component *component)
 		break;
 	}
 
-	return val == 0;
+	if (rt5651->jd_active_high)
+		return val != 0;
+	else
+		return val == 0;
 }
 
 /* Jack detect and button-press timings */
@@ -1770,6 +1821,9 @@ static int rt5651_detect_headset(struct snd_soc_component *component)
 
 static bool rt5651_support_button_press(struct rt5651_priv *rt5651)
 {
+	if (!rt5651->hp_jack)
+		return false;
+
 	/* Button press support only works with internal jack-detection */
 	return (rt5651->hp_jack->status & SND_JACK_MICROPHONE) &&
 		rt5651->gpiod_hp_det == NULL;
@@ -1868,20 +1922,47 @@ static void rt5651_enable_jack_detect(struct snd_soc_component *component,
 	case RT5651_JD1_1:
 		snd_soc_component_update_bits(component, RT5651_JD_CTRL2,
 			RT5651_JD_TRG_SEL_MASK, RT5651_JD_TRG_SEL_JD1_1);
-		snd_soc_component_update_bits(component, RT5651_IRQ_CTRL1,
-			RT5651_JD1_1_IRQ_EN, RT5651_JD1_1_IRQ_EN);
+		/* active-low is normal, set inv flag for active-high */
+		if (rt5651->jd_active_high)
+			snd_soc_component_update_bits(component,
+				RT5651_IRQ_CTRL1,
+				RT5651_JD1_1_IRQ_EN | RT5651_JD1_1_INV,
+				RT5651_JD1_1_IRQ_EN | RT5651_JD1_1_INV);
+		else
+			snd_soc_component_update_bits(component,
+				RT5651_IRQ_CTRL1,
+				RT5651_JD1_1_IRQ_EN | RT5651_JD1_1_INV,
+				RT5651_JD1_1_IRQ_EN);
 		break;
 	case RT5651_JD1_2:
 		snd_soc_component_update_bits(component, RT5651_JD_CTRL2,
 			RT5651_JD_TRG_SEL_MASK, RT5651_JD_TRG_SEL_JD1_2);
-		snd_soc_component_update_bits(component, RT5651_IRQ_CTRL1,
-			RT5651_JD1_2_IRQ_EN, RT5651_JD1_2_IRQ_EN);
+		/* active-low is normal, set inv flag for active-high */
+		if (rt5651->jd_active_high)
+			snd_soc_component_update_bits(component,
+				RT5651_IRQ_CTRL1,
+				RT5651_JD1_2_IRQ_EN | RT5651_JD1_2_INV,
+				RT5651_JD1_2_IRQ_EN | RT5651_JD1_2_INV);
+		else
+			snd_soc_component_update_bits(component,
+				RT5651_IRQ_CTRL1,
+				RT5651_JD1_2_IRQ_EN | RT5651_JD1_2_INV,
+				RT5651_JD1_2_IRQ_EN);
 		break;
 	case RT5651_JD2:
 		snd_soc_component_update_bits(component, RT5651_JD_CTRL2,
 			RT5651_JD_TRG_SEL_MASK, RT5651_JD_TRG_SEL_JD2);
-		snd_soc_component_update_bits(component, RT5651_IRQ_CTRL1,
-			RT5651_JD2_IRQ_EN, RT5651_JD2_IRQ_EN);
+		/* active-low is normal, set inv flag for active-high */
+		if (rt5651->jd_active_high)
+			snd_soc_component_update_bits(component,
+				RT5651_IRQ_CTRL1,
+				RT5651_JD2_IRQ_EN | RT5651_JD2_INV,
+				RT5651_JD2_IRQ_EN | RT5651_JD2_INV);
+		else
+			snd_soc_component_update_bits(component,
+				RT5651_IRQ_CTRL1,
+				RT5651_JD2_IRQ_EN | RT5651_JD2_INV,
+				RT5651_JD2_IRQ_EN);
 		break;
 	default:
 		dev_err(component->dev, "Currently only JD1_1 / JD1_2 / JD2 are supported\n");
@@ -1986,6 +2067,9 @@ static void rt5651_apply_properties(struct snd_soc_component *component)
 				     "realtek,jack-detect-source", &val) == 0)
 		rt5651->jd_src = val;
 
+	if (device_property_read_bool(component->dev, "realtek,jack-detect-not-inverted"))
+		rt5651->jd_active_high = true;
+
 	/*
 	 * Testing on various boards has shown that good defaults for the OVCD
 	 * threshold and scale-factor are 2000µA and 0.75. For an effective
@@ -2028,6 +2112,10 @@ static int rt5651_probe(struct snd_soc_component *component)
 
 	rt5651->component = component;
 
+	rt5651->mclk = devm_clk_get(component->dev, "mclk");
+	if (PTR_ERR(rt5651->mclk) == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
 	snd_soc_component_update_bits(component, RT5651_PWR_ANLG1,
 		RT5651_PWR_LDO_DVO_MASK, RT5651_PWR_LDO_DVO_1_2V);
 
@@ -2035,6 +2123,25 @@ static int rt5651_probe(struct snd_soc_component *component)
 
 	rt5651_apply_properties(component);
 
+	return 0;
+}
+
+static void rt5651_enable_spk(struct rt5651_priv *rt5651, bool enable)
+{
+	if (!rt5651 || !rt5651->gpiod_spk_ctl)
+		return;
+	gpiod_set_value(rt5651->gpiod_spk_ctl, enable);
+}
+
+static int rt5651_mute(struct snd_soc_dai *dai, int mute, int stream)
+{
+	struct snd_soc_component *component = dai->component;
+	struct rt5651_priv *rt5651 = snd_soc_component_get_drvdata(component);
+
+	if (mute)
+		rt5651_enable_spk(rt5651, false);
+	else
+		rt5651_enable_spk(rt5651, true);
 	return 0;
 }
 
@@ -2071,6 +2178,8 @@ static const struct snd_soc_dai_ops rt5651_aif_dai_ops = {
 	.set_fmt = rt5651_set_dai_fmt,
 	.set_sysclk = rt5651_set_dai_sysclk,
 	.set_pll = rt5651_set_dai_pll,
+	.mute_stream = rt5651_mute,
+	.no_capture_mute = 1,
 };
 
 static struct snd_soc_dai_driver rt5651_dai[] = {
@@ -2237,7 +2346,14 @@ static int rt5651_i2c_probe(struct i2c_client *i2c,
 			 rt5651->irq, ret);
 		rt5651->irq = -ENXIO;
 	}
-
+	rt5651->gpiod_spk_ctl = devm_gpiod_get(&i2c->dev,
+					       "spk-con",
+					       GPIOD_OUT_LOW);
+	if (IS_ERR(rt5651->gpiod_spk_ctl)) {
+		ret = IS_ERR(rt5651->gpiod_spk_ctl);
+		rt5651->gpiod_spk_ctl = NULL;
+		dev_warn(&i2c->dev, "cannot get spk-con-gpio %d\n", ret);
+	}
 	ret = devm_snd_soc_register_component(&i2c->dev,
 				&soc_component_dev_rt5651,
 				rt5651_dai, ARRAY_SIZE(rt5651_dai));

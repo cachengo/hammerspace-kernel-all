@@ -342,8 +342,7 @@ TRACE_DEFINE_ENUM(NFS4ERR_RESET_TO_PNFS);
 		{ NFS_ATTR_FATTR_CTIME, "CTIME" }, \
 		{ NFS_ATTR_FATTR_CHANGE, "CHANGE" }, \
 		{ NFS_ATTR_FATTR_OWNER_NAME, "OWNER_NAME" }, \
-		{ NFS_ATTR_FATTR_GROUP_NAME, "GROUP_NAME" }, \
-		{ NFS_ATTR_FATTR_UNCACHEABLE, "UNCACHEABLE" })
+		{ NFS_ATTR_FATTR_GROUP_NAME, "GROUP_NAME" })
 
 DECLARE_EVENT_CLASS(nfs4_clientid_event,
 		TP_PROTO(
@@ -498,6 +497,44 @@ TRACE_EVENT(nfs4_cb_sequence,
 			__entry->highest_slotid
 		)
 );
+
+TRACE_EVENT(nfs4_cb_seqid_err,
+		TP_PROTO(
+			const struct cb_sequenceargs *args,
+			__be32 status
+		),
+		TP_ARGS(args, status),
+
+		TP_STRUCT__entry(
+			__field(unsigned int, session)
+			__field(unsigned int, slot_nr)
+			__field(unsigned int, seq_nr)
+			__field(unsigned int, highest_slotid)
+			__field(unsigned int, cachethis)
+			__field(unsigned long, error)
+		),
+
+		TP_fast_assign(
+			__entry->session = nfs_session_id_hash(&args->csa_sessionid);
+			__entry->slot_nr = args->csa_slotid;
+			__entry->seq_nr = args->csa_sequenceid;
+			__entry->highest_slotid = args->csa_highestslotid;
+			__entry->cachethis = args->csa_cachethis;
+			__entry->error = be32_to_cpu(status);
+		),
+
+		TP_printk(
+			"error=%ld (%s) session=0x%08x slot_nr=%u seq_nr=%u "
+			"highest_slotid=%u",
+			-__entry->error,
+			show_nfsv4_errors(__entry->error),
+			__entry->session,
+			__entry->slot_nr,
+			__entry->seq_nr,
+			__entry->highest_slotid
+		)
+);
+
 #endif /* CONFIG_NFS_V4_1 */
 
 TRACE_EVENT(nfs4_setup_sequence,
@@ -614,7 +651,7 @@ TRACE_EVENT(nfs4_state_mgr_failed,
 		),
 
 		TP_fast_assign(
-			__entry->error = status;
+			__entry->error = status < 0 ? -status : 0;
 			__entry->state = clp->cl_state;
 			__assign_str(hostname, clp->cl_hostname);
 			__assign_str(section, section);
@@ -629,42 +666,7 @@ TRACE_EVENT(nfs4_state_mgr_failed,
 		)
 )
 
-TRACE_EVENT(nfs4_xdr_bad_operation,
-		TP_PROTO(
-			const struct xdr_stream *xdr,
-			u32 op,
-			u32 expected
-		),
-
-		TP_ARGS(xdr, op, expected),
-
-		TP_STRUCT__entry(
-			__field(unsigned int, task_id)
-			__field(unsigned int, client_id)
-			__field(u32, xid)
-			__field(u32, op)
-			__field(u32, expected)
-		),
-
-		TP_fast_assign(
-			const struct rpc_rqst *rqstp = xdr->rqst;
-			const struct rpc_task *task = rqstp->rq_task;
-
-			__entry->task_id = task->tk_pid;
-			__entry->client_id = task->tk_client->cl_clid;
-			__entry->xid = be32_to_cpu(rqstp->rq_xid);
-			__entry->op = op;
-			__entry->expected = expected;
-		),
-
-		TP_printk(
-			"task:%u@%d xid=0x%08x operation=%u, expected=%u",
-			__entry->task_id, __entry->client_id, __entry->xid,
-			__entry->op, __entry->expected
-		)
-);
-
-DECLARE_EVENT_CLASS(nfs4_xdr_event,
+TRACE_EVENT(nfs4_xdr_status,
 		TP_PROTO(
 			const struct xdr_stream *xdr,
 			u32 op,
@@ -699,16 +701,41 @@ DECLARE_EVENT_CLASS(nfs4_xdr_event,
 			__entry->op
 		)
 );
-#define DEFINE_NFS4_XDR_EVENT(name) \
-	DEFINE_EVENT(nfs4_xdr_event, name, \
+
+DECLARE_EVENT_CLASS(nfs4_cb_error_class,
+		TP_PROTO(
+			__be32 xid,
+			u32 cb_ident
+		),
+
+		TP_ARGS(xid, cb_ident),
+
+		TP_STRUCT__entry(
+			__field(u32, xid)
+			__field(u32, cbident)
+		),
+
+		TP_fast_assign(
+			__entry->xid = be32_to_cpu(xid);
+			__entry->cbident = cb_ident;
+		),
+
+		TP_printk(
+			"xid=0x%08x cb_ident=0x%08x",
+			__entry->xid, __entry->cbident
+		)
+);
+
+#define DEFINE_CB_ERROR_EVENT(name) \
+	DEFINE_EVENT(nfs4_cb_error_class, nfs_cb_##name, \
 			TP_PROTO( \
-				const struct xdr_stream *xdr, \
-				u32 op, \
-				u32 error \
+				__be32 xid, \
+				u32 cb_ident \
 			), \
-			TP_ARGS(xdr, op, error))
-DEFINE_NFS4_XDR_EVENT(nfs4_xdr_status);
-DEFINE_NFS4_XDR_EVENT(nfs4_xdr_bad_filehandle);
+			TP_ARGS(xid, cb_ident))
+
+DEFINE_CB_ERROR_EVENT(no_clp);
+DEFINE_CB_ERROR_EVENT(badprinc);
 
 DECLARE_EVENT_CLASS(nfs4_open_event,
 		TP_PROTO(
@@ -1054,6 +1081,8 @@ TRACE_DEFINE_ENUM(NFS_STATE_RECOVERY_FAILED);
 TRACE_DEFINE_ENUM(NFS_STATE_MAY_NOTIFY_LOCK);
 TRACE_DEFINE_ENUM(NFS_STATE_CHANGE_WAIT);
 TRACE_DEFINE_ENUM(NFS_CLNT_DST_SSC_COPY_STATE);
+TRACE_DEFINE_ENUM(NFS_CLNT_SRC_SSC_COPY_STATE);
+TRACE_DEFINE_ENUM(NFS_SRV_SSC_COPY_STATE);
 
 #define show_nfs4_state_flags(flags) \
 	__print_flags(flags, "|", \
@@ -1069,7 +1098,9 @@ TRACE_DEFINE_ENUM(NFS_CLNT_DST_SSC_COPY_STATE);
 		{ NFS_STATE_RECOVERY_FAILED,	"RECOVERY_FAILED" }, \
 		{ NFS_STATE_MAY_NOTIFY_LOCK,	"MAY_NOTIFY_LOCK" }, \
 		{ NFS_STATE_CHANGE_WAIT,	"CHANGE_WAIT" }, \
-		{ NFS_CLNT_DST_SSC_COPY_STATE,	"CLNT_DST_SSC_COPY" })
+		{ NFS_CLNT_DST_SSC_COPY_STATE,	"CLNT_DST_SSC_COPY" }, \
+		{ NFS_CLNT_SRC_SSC_COPY_STATE,	"CLNT_SRC_SSC_COPY" }, \
+		{ NFS_SRV_SSC_COPY_STATE,	"SRV_SSC_COPY" })
 
 #define show_nfs4_lock_flags(flags) \
 	__print_flags(flags, "|", \
@@ -1418,57 +1449,13 @@ DECLARE_EVENT_CLASS(nfs4_inode_event,
 
 DEFINE_NFS4_INODE_EVENT(nfs4_access);
 DEFINE_NFS4_INODE_EVENT(nfs4_readlink);
+DEFINE_NFS4_INODE_EVENT(nfs4_readdir);
 DEFINE_NFS4_INODE_EVENT(nfs4_get_acl);
 DEFINE_NFS4_INODE_EVENT(nfs4_set_acl);
 #ifdef CONFIG_NFS_V4_SECURITY_LABEL
 DEFINE_NFS4_INODE_EVENT(nfs4_get_security_label);
 DEFINE_NFS4_INODE_EVENT(nfs4_set_security_label);
 #endif /* CONFIG_NFS_V4_SECURITY_LABEL */
-
-DECLARE_EVENT_CLASS(nfs4_readdir_event,
-		TP_PROTO(
-			const struct inode *inode,
-			int error
-		),
-
-		TP_ARGS(inode, error),
-
-		TP_STRUCT__entry(
-			__field(dev_t, dev)
-			__field(u32, fhandle)
-			__field(u64, fileid)
-			__field(unsigned long, error)
-			__field(u32, uncacheable)
-		),
-
-		TP_fast_assign(
-			__entry->dev = inode->i_sb->s_dev;
-			__entry->fileid = NFS_FILEID(inode);
-			__entry->fhandle = nfs_fhandle_hash(NFS_FH(inode));
-			__entry->error = error < 0 ? -error : 0;
-			__entry->uncacheable = NFS_I(inode)->uncacheable;
-		),
-
-		TP_printk(
-			"error=%ld (%s) fileid=%02x:%02x:%llu fhandle=0x%08x uncacheable=%u",
-			-__entry->error,
-			show_nfsv4_errors(__entry->error),
-			MAJOR(__entry->dev), MINOR(__entry->dev),
-			(unsigned long long)__entry->fileid,
-			__entry->fhandle,
-			__entry->uncacheable
-		)
-);
-
-#define DEFINE_NFS4_READDIR_EVENT(name) \
-	DEFINE_EVENT(nfs4_readdir_event, name, \
-			TP_PROTO( \
-				const struct inode *inode, \
-				int error \
-			), \
-			TP_ARGS(inode, error))
-
-DEFINE_NFS4_READDIR_EVENT(nfs4_readdir);
 
 DECLARE_EVENT_CLASS(nfs4_inode_stateid_event,
 		TP_PROTO(
@@ -1695,6 +1682,52 @@ DECLARE_EVENT_CLASS(nfs4_inode_stateid_callback_event,
 DEFINE_NFS4_INODE_STATEID_CALLBACK_EVENT(nfs4_cb_recall);
 DEFINE_NFS4_INODE_STATEID_CALLBACK_EVENT(nfs4_cb_layoutrecall_file);
 
+DECLARE_EVENT_CLASS(nfs4_idmap_event,
+		TP_PROTO(
+			const char *name,
+			int len,
+			u32 id,
+			int error
+		),
+
+		TP_ARGS(name, len, id, error),
+
+		TP_STRUCT__entry(
+			__field(unsigned long, error)
+			__field(u32, id)
+			__dynamic_array(char, name, len > 0 ? len + 1 : 1)
+		),
+
+		TP_fast_assign(
+			if (len < 0)
+				len = 0;
+			__entry->error = error < 0 ? error : 0;
+			__entry->id = id;
+			memcpy(__get_str(name), name, len);
+			__get_str(name)[len] = 0;
+		),
+
+		TP_printk(
+			"error=%ld (%s) id=%u name=%s",
+			-__entry->error, show_nfsv4_errors(__entry->error),
+			__entry->id,
+			__get_str(name)
+		)
+);
+#define DEFINE_NFS4_IDMAP_EVENT(name) \
+	DEFINE_EVENT(nfs4_idmap_event, name, \
+			TP_PROTO( \
+				const char *name, \
+				int len, \
+				u32 id, \
+				int error \
+			), \
+			TP_ARGS(name, len, id, error))
+DEFINE_NFS4_IDMAP_EVENT(nfs4_map_name_to_uid);
+DEFINE_NFS4_IDMAP_EVENT(nfs4_map_group_to_gid);
+DEFINE_NFS4_IDMAP_EVENT(nfs4_map_uid_to_name);
+DEFINE_NFS4_IDMAP_EVENT(nfs4_map_gid_to_group);
+
 #ifdef CONFIG_NFS_V4_1
 #define NFS4_LSEG_LAYOUT_STATEID_HASH(lseg) \
 	(lseg ? nfs_stateid_hash(&lseg->pls_layout->plh_stateid) : 0)
@@ -1863,9 +1896,9 @@ DECLARE_EVENT_CLASS(nfs4_commit_event,
 			__field(dev_t, dev)
 			__field(u32, fhandle)
 			__field(u64, fileid)
+			__field(unsigned long, error)
 			__field(loff_t, offset)
 			__field(u32, count)
-			__field(unsigned long, error)
 			__field(int, layoutstateid_seq)
 			__field(u32, layoutstateid_hash)
 		),
@@ -2155,81 +2188,6 @@ DEFINE_PNFS_LAYOUT_EVENT(pnfs_mds_fallback_read_done);
 DEFINE_PNFS_LAYOUT_EVENT(pnfs_mds_fallback_write_done);
 DEFINE_PNFS_LAYOUT_EVENT(pnfs_mds_fallback_read_pagelist);
 DEFINE_PNFS_LAYOUT_EVENT(pnfs_mds_fallback_write_pagelist);
-
-DECLARE_EVENT_CLASS(nfs4_deviceid_event,
-		TP_PROTO(
-			const struct nfs_client *clp,
-			const struct nfs4_deviceid *deviceid
-		),
-
-		TP_ARGS(clp, deviceid),
-
-		TP_STRUCT__entry(
-			__string(dstaddr, clp->cl_hostname)
-			__array(unsigned char, deviceid, NFS4_DEVICEID4_SIZE)
-		),
-
-		TP_fast_assign(
-			__assign_str(dstaddr, clp->cl_hostname);
-			memcpy(__entry->deviceid, deviceid->data,
-			       NFS4_DEVICEID4_SIZE);
-		),
-
-		TP_printk(
-			"deviceid=%s, dstaddr=%s",
-			__print_hex(__entry->deviceid, NFS4_DEVICEID4_SIZE),
-			__get_str(dstaddr)
-		)
-);
-#define DEFINE_PNFS_DEVICEID_EVENT(name) \
-	DEFINE_EVENT(nfs4_deviceid_event, name, \
-			TP_PROTO(const struct nfs_client *clp, \
-				const struct nfs4_deviceid *deviceid \
-			), \
-			TP_ARGS(clp, deviceid))
-DEFINE_PNFS_DEVICEID_EVENT(nfs4_deviceid_free);
-
-DECLARE_EVENT_CLASS(nfs4_deviceid_status,
-		TP_PROTO(
-			const struct nfs_server *server,
-			const struct nfs4_deviceid *deviceid,
-			int status
-		),
-
-		TP_ARGS(server, deviceid, status),
-
-		TP_STRUCT__entry(
-			__field(dev_t, dev)
-			__field(int, status)
-			__string(dstaddr, server->nfs_client->cl_hostname)
-			__array(unsigned char, deviceid, NFS4_DEVICEID4_SIZE)
-		),
-
-		TP_fast_assign(
-			__entry->dev = server->s_dev;
-			__entry->status = status;
-			__assign_str(dstaddr, server->nfs_client->cl_hostname);
-			memcpy(__entry->deviceid, deviceid->data,
-			       NFS4_DEVICEID4_SIZE);
-		),
-
-		TP_printk(
-			"dev=%02x:%02x: deviceid=%s, dstaddr=%s, status=%d",
-			MAJOR(__entry->dev), MINOR(__entry->dev),
-			__print_hex(__entry->deviceid, NFS4_DEVICEID4_SIZE),
-			__get_str(dstaddr),
-			__entry->status
-		)
-);
-#define DEFINE_PNFS_DEVICEID_STATUS(name) \
-	DEFINE_EVENT(nfs4_deviceid_status, name, \
-			TP_PROTO(const struct nfs_server *server, \
-				const struct nfs4_deviceid *deviceid, \
-				int status \
-			), \
-			TP_ARGS(server, deviceid, status))
-DEFINE_PNFS_DEVICEID_STATUS(nfs4_getdeviceinfo);
-DEFINE_PNFS_DEVICEID_STATUS(nfs4_find_deviceid);
 
 DECLARE_EVENT_CLASS(nfs4_flexfiles_io_event,
 		TP_PROTO(

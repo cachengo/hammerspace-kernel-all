@@ -62,8 +62,7 @@ static atomic_t rds_tcp_unloading = ATOMIC_INIT(0);
 static struct kmem_cache *rds_tcp_conn_slab;
 
 static int rds_tcp_skbuf_handler(struct ctl_table *ctl, int write,
-				 void __user *buffer, size_t *lenp,
-				 loff_t *fpos);
+				 void *buffer, size_t *lenp, loff_t *fpos);
 
 static int rds_tcp_min_sndbuf = SOCK_MIN_SNDBUF;
 static int rds_tcp_min_rcvbuf = SOCK_MIN_RCVBUF;
@@ -314,8 +313,8 @@ out:
 }
 #endif
 
-static int rds_tcp_laddr_check(struct net *net, const struct in6_addr *addr,
-			       __u32 scope_id)
+int rds_tcp_laddr_check(struct net *net, const struct in6_addr *addr,
+			__u32 scope_id)
 {
 	struct net_device *dev = NULL;
 #if IS_ENABLED(CONFIG_IPV6)
@@ -542,7 +541,7 @@ static __net_init int rds_tcp_init_net(struct net *net)
 		tbl = kmemdup(rds_tcp_sysctl_table,
 			      sizeof(rds_tcp_sysctl_table), GFP_KERNEL);
 		if (!tbl) {
-			pr_warn("could not set allocate syctl table\n");
+			pr_warn("could not set allocate sysctl table\n");
 			return -ENOMEM;
 		}
 		rtn->ctl_table = tbl;
@@ -667,8 +666,7 @@ static void rds_tcp_sysctl_reset(struct net *net)
 }
 
 static int rds_tcp_skbuf_handler(struct ctl_table *ctl, int write,
-				 void __user *buffer, size_t *lenp,
-				 loff_t *fpos)
+				 void *buffer, size_t *lenp, loff_t *fpos)
 {
 	struct net *net = current->nsproxy->net_ns;
 	int err;

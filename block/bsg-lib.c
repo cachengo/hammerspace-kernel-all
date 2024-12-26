@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  BSG helper library
  *
  *  Copyright (C) 2008   James Smart, Emulex Corporation
  *  Copyright (C) 2011   Red Hat, Inc.  All rights reserved.
  *  Copyright (C) 2011   Mike Christie
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 #include <linux/slab.h>
 #include <linux/blk-mq.h>
@@ -195,9 +181,12 @@ EXPORT_SYMBOL_GPL(bsg_job_get);
 void bsg_job_done(struct bsg_job *job, int result,
 		  unsigned int reply_payload_rcv_len)
 {
+	struct request *rq = blk_mq_rq_from_pdu(job);
+
 	job->result = result;
 	job->reply_payload_rcv_len = reply_payload_rcv_len;
-	blk_mq_complete_request(blk_mq_rq_from_pdu(job));
+	if (likely(!blk_should_fake_timeout(rq->q)))
+		blk_mq_complete_request(rq);
 }
 EXPORT_SYMBOL_GPL(bsg_job_done);
 
@@ -218,7 +207,7 @@ static int bsg_map_buffer(struct bsg_buffer *buf, struct request *req)
 
 	BUG_ON(!req->nr_phys_segments);
 
-	buf->sg_list = kzalloc(sz, GFP_KERNEL);
+	buf->sg_list = kmalloc(sz, GFP_KERNEL);
 	if (!buf->sg_list)
 		return -ENOMEM;
 	sg_init_table(buf->sg_list, req->nr_phys_segments);
@@ -280,6 +269,7 @@ static blk_status_t bsg_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct request *req = bd->rq;
 	struct bsg_set *bset =
 		container_of(q->tag_set, struct bsg_set, tag_set);
+	blk_status_t sts = BLK_STS_IOERR;
 	int ret;
 
 	blk_mq_start_request(req);
@@ -288,14 +278,15 @@ static blk_status_t bsg_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_IOERR;
 
 	if (!bsg_prepare_job(dev, req))
-		return BLK_STS_IOERR;
+		goto out;
 
 	ret = bset->job_fn(blk_mq_rq_to_pdu(req));
-	if (ret)
-		return BLK_STS_IOERR;
+	if (!ret)
+		sts = BLK_STS_OK;
 
+out:
 	put_device(dev);
-	return BLK_STS_OK;
+	return sts;
 }
 
 /* called right after the request is allocated for the request_queue */
@@ -368,6 +359,7 @@ static const struct blk_mq_ops bsg_mq_ops = {
  * @dev: device to attach bsg device to
  * @name: device to give bsg device
  * @job_fn: bsg job handler
+ * @timeout: timeout handler function pointer
  * @dd_job_size: size of LLD data needed for each job
  */
 struct request_queue *bsg_setup_queue(struct device *dev, const char *name,
@@ -386,7 +378,7 @@ struct request_queue *bsg_setup_queue(struct device *dev, const char *name,
 	bset->timeout_fn = timeout;
 
 	set = &bset->tag_set;
-	set->ops = &bsg_mq_ops,
+	set->ops = &bsg_mq_ops;
 	set->nr_hw_queues = 1;
 	set->queue_depth = 128;
 	set->numa_node = NUMA_NO_NODE;

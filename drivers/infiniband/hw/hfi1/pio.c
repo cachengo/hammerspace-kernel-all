@@ -86,7 +86,7 @@ void pio_send_control(struct hfi1_devdata *dd, int op)
 	switch (op) {
 	case PSC_GLOBAL_ENABLE:
 		reg |= SEND_CTRL_SEND_ENABLE_SMASK;
-	/* Fall through */
+		fallthrough;
 	case PSC_DATA_VL_ENABLE:
 		mask = 0;
 		for (i = 0; i < ARRAY_SIZE(dd->vld); i++)
@@ -1594,10 +1594,8 @@ void hfi1_sc_wantpiobuf_intr(struct send_context *sc, u32 needint)
 	else
 		sc_del_credit_return_intr(sc);
 	trace_hfi1_wantpiointr(sc, needint, sc->credit_ctrl);
-	if (needint) {
-		mmiowb();
+	if (needint)
 		sc_return_credits(sc);
-	}
 }
 
 /**

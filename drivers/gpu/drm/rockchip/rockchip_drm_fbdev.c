@@ -1,20 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
  * Author:Mark Yao <mark.yao@rock-chips.com>
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <drm/drm.h>
-#include <drm/drmP.h>
 #include <drm/drm_fb_helper.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_probe_helper.h>
 
 #include "rockchip_drm_drv.h"
@@ -23,19 +15,17 @@
 #include "rockchip_drm_fbdev.h"
 
 #define PREFERRED_BPP		32
-#define to_drm_private(x) \
-		container_of(x, struct rockchip_drm_private, fbdev_helper)
 
 static int rockchip_fbdev_mmap(struct fb_info *info,
 			       struct vm_area_struct *vma)
 {
 	struct drm_fb_helper *helper = info->par;
-	struct rockchip_drm_private *private = to_drm_private(helper);
+	struct rockchip_drm_private *private = helper->dev->dev_private;
 
 	return rockchip_gem_mmap_buf(private->fbdev_bo, vma);
 }
 
-static struct fb_ops rockchip_drm_fbdev_ops = {
+static const struct fb_ops rockchip_drm_fbdev_ops = {
 	.owner		= THIS_MODULE,
 	DRM_FB_HELPER_DEFAULT_OPS,
 	.fb_mmap	= rockchip_fbdev_mmap,
@@ -47,7 +37,7 @@ static struct fb_ops rockchip_drm_fbdev_ops = {
 static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 				     struct drm_fb_helper_surface_size *sizes)
 {
-	struct rockchip_drm_private *private = to_drm_private(helper);
+	struct rockchip_drm_private *private = helper->dev->dev_private;
 	struct drm_mode_fb_cmd2 mode_cmd = { 0 };
 	struct drm_device *dev = helper->dev;
 	struct rockchip_gem_object *rk_obj;
@@ -68,7 +58,7 @@ static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 
 	size = mode_cmd.pitches[0] * mode_cmd.height;
 
-	rk_obj = rockchip_gem_create_object(dev, size, true);
+	rk_obj = rockchip_gem_create_object(dev, size, true, 0);
 	if (IS_ERR(rk_obj))
 		return -ENOMEM;
 
@@ -90,12 +80,10 @@ static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 		goto out;
 	}
 
-	fbi->par = helper;
 	fbi->fbops = &rockchip_drm_fbdev_ops;
 
 	fb = helper->fb;
-	drm_fb_helper_fill_fix(fbi, fb->pitches[0], fb->format->depth);
-	drm_fb_helper_fill_var(fbi, helper, sizes->fb_width, sizes->fb_height);
+	drm_fb_helper_fill_info(fbi, helper, sizes);
 
 	offset = fbi->var.xoffset * bytes_per_pixel;
 	offset += fbi->var.yoffset * fb->pitches[0];
@@ -110,12 +98,10 @@ static int rockchip_drm_fbdev_create(struct drm_fb_helper *helper,
 		      rk_obj->kvaddr,
 		      offset, size);
 
-	fbi->skip_vt_switch = true;
-
 	return 0;
 
 out:
-	rockchip_gem_free_object(&rk_obj->base);
+	drm_gem_object_put(&rk_obj->base);
 	return ret;
 }
 
@@ -132,23 +118,19 @@ int rockchip_drm_fbdev_init(struct drm_device *dev)
 	if (!dev->mode_config.num_crtc || !dev->mode_config.num_connector)
 		return -EINVAL;
 
-	helper = &private->fbdev_helper;
+	helper = devm_kzalloc(dev->dev, sizeof(*helper), GFP_KERNEL);
+	if (!helper)
+		return -ENOMEM;
+	private->fbdev_helper = helper;
 
 	drm_fb_helper_prepare(dev, helper, &rockchip_drm_fb_helper_funcs);
 
-	ret = drm_fb_helper_init(dev, helper, ROCKCHIP_MAX_CONNECTOR);
+	ret = drm_fb_helper_init(dev, helper);
 	if (ret < 0) {
 		DRM_DEV_ERROR(dev->dev,
 			      "Failed to initialize drm fb helper - %d.\n",
 			      ret);
 		return ret;
-	}
-
-	ret = drm_fb_helper_single_add_all_connectors(helper);
-	if (ret < 0) {
-		DRM_DEV_ERROR(dev->dev,
-			      "Failed to add connectors - %d.\n", ret);
-		goto err_drm_fb_helper_fini;
 	}
 
 	ret = drm_fb_helper_initial_config(helper, PREFERRED_BPP);
@@ -169,9 +151,10 @@ err_drm_fb_helper_fini:
 void rockchip_drm_fbdev_fini(struct drm_device *dev)
 {
 	struct rockchip_drm_private *private = dev->dev_private;
-	struct drm_fb_helper *helper;
+	struct drm_fb_helper *helper = private->fbdev_helper;
 
-	helper = &private->fbdev_helper;
+	if (!helper)
+		return;
 
 	drm_fb_helper_unregister_fbi(helper);
 

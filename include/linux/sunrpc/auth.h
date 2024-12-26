@@ -10,10 +10,7 @@
 #ifndef _LINUX_SUNRPC_AUTH_H
 #define _LINUX_SUNRPC_AUTH_H
 
-#ifdef __KERNEL__
-
 #include <linux/sunrpc/sched.h>
-#include <linux/sunrpc/svcauth.h>
 #include <linux/sunrpc/msg_prot.h>
 #include <linux/sunrpc/xdr.h>
 
@@ -65,7 +62,6 @@ struct rpc_cred {
 #define RPCAUTH_CRED_UPTODATE	1
 #define RPCAUTH_CRED_HASHED	2
 #define RPCAUTH_CRED_NEGATIVE	3
-#define RPCAUTH_CRED_INIT	4
 
 const struct cred *rpc_machine_cred(void);
 
@@ -80,7 +76,7 @@ struct rpc_auth {
 	unsigned int		au_verfsize;	/* size of reply verifier */
 	unsigned int		au_ralign;	/* words before UL header */
 
-	unsigned int		au_flags;
+	unsigned long		au_flags;
 	const struct rpc_authops *au_ops;
 	rpc_authflavor_t	au_flavor;	/* pseudoflavor (note may
 						 * differ from the flavor in
@@ -93,7 +89,8 @@ struct rpc_auth {
 };
 
 /* rpc_auth au_flags */
-#define RPCAUTH_AUTH_DATATOUCH	0x00000002
+#define RPCAUTH_AUTH_DATATOUCH		(1)
+#define RPCAUTH_AUTH_UPDATE_SLACK	(2)
 
 struct rpc_auth_create_args {
 	rpc_authflavor_t pseudoflavor;
@@ -117,7 +114,6 @@ struct rpc_authops {
 	int			(*hash_cred)(struct auth_cred *, unsigned int);
 	struct rpc_cred *	(*lookup_cred)(struct rpc_auth *, struct auth_cred *, int);
 	struct rpc_cred *	(*crcreate)(struct rpc_auth*, struct auth_cred *, int, gfp_t);
-	int			(*list_pseudoflavors)(rpc_authflavor_t *, int);
 	rpc_authflavor_t	(*info2flavor)(struct rpcsec_gss_info *);
 	int			(*flavor2info)(rpc_authflavor_t,
 						struct rpcsec_gss_info *);
@@ -162,7 +158,6 @@ rpc_authflavor_t	rpcauth_get_pseudoflavor(rpc_authflavor_t,
 				struct rpcsec_gss_info *);
 int			rpcauth_get_gssinfo(rpc_authflavor_t,
 				struct rpcsec_gss_info *);
-int			rpcauth_list_flavors(rpc_authflavor_t *, int);
 struct rpc_cred *	rpcauth_lookup_credcache(struct rpc_auth *, struct auth_cred *, int, gfp_t);
 void			rpcauth_init_cred(struct rpc_cred *, const struct auth_cred *, struct rpc_auth *, const struct rpc_credops *);
 struct rpc_cred *	rpcauth_lookupcred(struct rpc_auth *, int);
@@ -186,9 +181,6 @@ int			rpcauth_uptodatecred(struct rpc_task *);
 int			rpcauth_init_credcache(struct rpc_auth *);
 void			rpcauth_destroy_credcache(struct rpc_auth *);
 void			rpcauth_clear_credcache(struct rpc_cred_cache *);
-bool			rpcauth_map_to_svc_cred(struct rpc_auth *,
-						const struct cred *,
-						struct svc_cred *);
 char *			rpcauth_stringify_acceptor(struct rpc_cred *);
 
 static inline
@@ -199,5 +191,4 @@ struct rpc_cred *get_rpccred(struct rpc_cred *cred)
 	return NULL;
 }
 
-#endif /* __KERNEL__ */
 #endif /* _LINUX_SUNRPC_AUTH_H */

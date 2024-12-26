@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Module for pnfs flexfile layout driver.
  *
@@ -10,11 +11,9 @@
 #include <linux/nfs_mount.h>
 #include <linux/nfs_page.h>
 #include <linux/module.h>
-#include <linux/file.h>
 #include <linux/sched/mm.h>
 
 #include <linux/sunrpc/metrics.h>
-#include <linux/sunrpc/addr.h>
 
 #include "flexfilelayout.h"
 #include "../nfs4session.h"
@@ -50,7 +49,7 @@ ff_layout_alloc_layout_hdr(struct inode *inode, gfp_t gfp_flags)
 
 	ffl = kzalloc(sizeof(*ffl), gfp_flags);
 	if (ffl) {
-		INIT_LIST_HEAD(&ffl->commit_info.commits);
+		pnfs_init_ds_commit_info(&ffl->commit_info);
 		INIT_LIST_HEAD(&ffl->error_list);
 		INIT_LIST_HEAD(&ffl->mirrors);
 		ffl->last_report_time = ktime_get();
@@ -157,53 +156,6 @@ decode_name(struct xdr_stream *xdr, u32 *id)
 	return 0;
 }
 
-static struct file *
-ff_local_open_fh(struct pnfs_layout_segment *lseg,
-		 u32 ds_idx,
-		 struct nfs_client *clp,
-		 const struct cred *cred,
-		 struct nfs_fh *fh,
-		 fmode_t mode)
-{
-	struct nfs4_ff_layout_mirror *mirror = FF_LAYOUT_COMP(lseg, ds_idx);
-	struct file *filp, *new, __rcu **pfile;
-
-	if (!nfs_server_is_local(clp))
-		return NULL;
-	if (mode & FMODE_WRITE) {
-		/*
-		 * Always request read and write access since this corresponds
-		 * to a rw layout.
-		 */
-		mode |= FMODE_READ;
-		pfile = &mirror->rw_file;
-	} else
-		pfile = &mirror->ro_file;
-
-	new = NULL;
-	rcu_read_lock();
-	filp = rcu_dereference(*pfile);
-	if (!filp) {
-		rcu_read_unlock();
-		new = nfs_local_open_fh(clp, cred, fh, mode);
-		if (IS_ERR(new))
-			return NULL;
-		rcu_read_lock();
-		/* try to swap in the pointer */
-		filp = cmpxchg(pfile, NULL, new);
-		if (!filp) {
-			filp = new;
-			new = NULL;
-		}
-	}
-	if (!get_file_rcu(filp))
-		filp = NULL;
-	rcu_read_unlock();
-	if (new)
-		fput(new);
-	return filp;
-}
-
 static bool ff_mirror_match_fh(const struct nfs4_ff_layout_mirror *m1,
 		const struct nfs4_ff_layout_mirror *m2)
 {
@@ -279,15 +231,8 @@ static struct nfs4_ff_layout_mirror *ff_layout_alloc_mirror(gfp_t gfp_flags)
 
 static void ff_layout_free_mirror(struct nfs4_ff_layout_mirror *mirror)
 {
-	struct file *filp;
 	const struct cred	*cred;
 
-	filp = rcu_access_pointer(mirror->ro_file);
-	if (filp)
-		fput(filp);
-	filp = rcu_access_pointer(mirror->rw_file);
-	if (filp)
-		fput(filp);
 	ff_layout_remove_mirror(mirror);
 	kfree(mirror->fh_versions);
 	cred = rcu_access_pointer(mirror->ro_cred);
@@ -463,7 +408,6 @@ ff_layout_alloc_lseg(struct pnfs_layout_hdr *lh,
 		struct nfs4_ff_layout_mirror *mirror;
 		struct cred *kcred;
 		const struct cred __rcu *cred;
-		const struct cred __rcu *old;
 		kuid_t uid;
 		kgid_t gid;
 		u32 ds_count, fh_count, id;
@@ -563,26 +507,13 @@ ff_layout_alloc_lseg(struct pnfs_layout_hdr *lh,
 
 		mirror = ff_layout_add_mirror(lh, fls->mirror_array[i]);
 		if (mirror != fls->mirror_array[i]) {
-			struct file *filp;
-
 			/* swap cred ptrs so free_mirror will clean up old */
 			if (lgr->range.iomode == IOMODE_READ) {
-				old = xchg(&mirror->ro_cred, cred);
-				rcu_assign_pointer(fls->mirror_array[i]->ro_cred, old);
-				/* drop file if creds changed */
-				if (old != cred) {
-					filp = rcu_dereference_protected(xchg(&mirror->ro_file, NULL), 1);
-					if (filp)
-						fput(filp);
-				}
+				cred = xchg(&mirror->ro_cred, cred);
+				rcu_assign_pointer(fls->mirror_array[i]->ro_cred, cred);
 			} else {
-				old = xchg(&mirror->rw_cred, cred);
-				rcu_assign_pointer(fls->mirror_array[i]->rw_cred, old);
-				if (old != cred) {
-					filp = rcu_dereference_protected(xchg(&mirror->rw_file, NULL), 1);
-					if (filp)
-						fput(filp);
-				}
+				cred = xchg(&mirror->rw_cred, cred);
+				rcu_assign_pointer(fls->mirror_array[i]->rw_cred, cred);
 			}
 			ff_layout_free_mirror(fls->mirror_array[i]);
 			fls->mirror_array[i] = mirror;
@@ -809,12 +740,16 @@ ff_layout_choose_ds_for_read(struct pnfs_layout_segment *lseg,
 	struct nfs4_ff_layout_segment *fls = FF_LAYOUT_LSEG(lseg);
 	struct nfs4_ff_layout_mirror *mirror;
 	struct nfs4_pnfs_ds *ds;
+	bool fail_return = false;
 	u32 idx;
 
 	/* mirrors are initially sorted by efficiency */
 	for (idx = start_idx; idx < fls->mirror_array_cnt; idx++) {
+		if (idx+1 == fls->mirror_array_cnt)
+			fail_return = !check_device;
+
 		mirror = FF_LAYOUT_COMP(lseg, idx);
-		ds = nfs4_ff_layout_prepare_ds(lseg, mirror, false);
+		ds = nfs4_ff_layout_prepare_ds(lseg, mirror, fail_return);
 		if (!ds)
 			continue;
 
@@ -1214,7 +1149,7 @@ static int ff_layout_async_handle_error_v4(struct rpc_task *task,
 		nfs4_delete_deviceid(devid->ld, devid->nfs_client,
 				&devid->deviceid);
 		rpc_wake_up(&tbl->slot_tbl_waitq);
-		/* fall through */
+		fallthrough;
 	default:
 		if (ff_layout_avoid_mds_available_ds(lseg))
 			return -NFS4ERR_RESET_TO_PNFS;
@@ -1252,7 +1187,7 @@ static int ff_layout_async_handle_error_v3(struct rpc_task *task,
 		nfs4_delete_deviceid(devid->ld, devid->nfs_client,
 				&devid->deviceid);
 	}
-	task->tk_status = -EAGAIN;
+	/* FIXME: Need to prevent infinite looping here. */
 	return -NFS4ERR_RESET_TO_PNFS;
 out_retry:
 	task->tk_status = 0;
@@ -1341,7 +1276,7 @@ static void ff_layout_io_track_ds_error(struct pnfs_layout_segment *lseg,
 		 */
 		if (opnum == OP_READ)
 			break;
-		/* Fallthrough */
+		fallthrough;
 	default:
 		pnfs_error_mark_layout_for_return(lseg->pls_layout->plh_inode,
 						  lseg);
@@ -1374,10 +1309,10 @@ static int ff_layout_read_done_cb(struct rpc_task *task,
 	switch (err) {
 	case -NFS4ERR_RESET_TO_PNFS:
 		set_bit(NFS_IOHDR_RESEND_PNFS, &hdr->flags);
-		return task->tk_status ? : -EAGAIN;
+		return task->tk_status;
 	case -NFS4ERR_RESET_TO_MDS:
 		set_bit(NFS_IOHDR_RESEND_MDS, &hdr->flags);
-		return task->tk_status ? : -EAGAIN;
+		return task->tk_status;
 	case -EAGAIN:
 		goto out_eagain;
 	}
@@ -1541,10 +1476,10 @@ static int ff_layout_write_done_cb(struct rpc_task *task,
 	switch (err) {
 	case -NFS4ERR_RESET_TO_PNFS:
 		set_bit(NFS_IOHDR_RESEND_PNFS, &hdr->flags);
-		return task->tk_status ? : -EAGAIN;
+		return task->tk_status;
 	case -NFS4ERR_RESET_TO_MDS:
 		set_bit(NFS_IOHDR_RESEND_MDS, &hdr->flags);
-		return task->tk_status ? : -EAGAIN;
+		return task->tk_status;
 	case -EAGAIN:
 		return -EAGAIN;
 	}
@@ -1589,6 +1524,7 @@ static int ff_layout_commit_done_cb(struct rpc_task *task,
 		pnfs_generic_prepare_to_resend_writes(data);
 		return -EAGAIN;
 	case -EAGAIN:
+		rpc_restart_call_prepare(task);
 		return -EAGAIN;
 	}
 
@@ -1809,13 +1745,11 @@ static const struct rpc_call_ops ff_layout_commit_call_ops_v4 = {
 };
 
 static enum pnfs_try_status
-ff_layout_read_pagelist(struct nfs_pageio_descriptor *desc,
-			struct nfs_pgio_header *hdr)
+ff_layout_read_pagelist(struct nfs_pgio_header *hdr)
 {
 	struct pnfs_layout_segment *lseg = hdr->lseg;
 	struct nfs4_pnfs_ds *ds;
 	struct rpc_clnt *ds_clnt;
-	struct file *filp;
 	struct nfs4_ff_layout_mirror *mirror;
 	const struct cred *ds_cred;
 	loff_t offset = hdr->args.offset;
@@ -1862,20 +1796,11 @@ ff_layout_read_pagelist(struct nfs_pageio_descriptor *desc,
 	hdr->args.offset = offset;
 	hdr->mds_offset = offset;
 
-	/* Start IO accounting for local read */
-	filp = ff_local_open_fh(lseg, idx, ds->ds_clp, ds_cred, fh,
-				FMODE_READ);
-	if (filp) {
-		hdr->task.tk_start = ktime_get();
-		ff_layout_read_record_layoutstats_start(&hdr->task, hdr);
-	}
-
 	/* Perform an asynchronous read to ds */
-	nfs_initiate_pgio(desc, ds->ds_clp, ds_clnt, hdr, ds_cred,
-			  ds->ds_clp->rpc_ops,
+	nfs_initiate_pgio(ds_clnt, hdr, ds_cred, ds->ds_clp->rpc_ops,
 			  vers == 3 ? &ff_layout_read_call_ops_v3 :
 				      &ff_layout_read_call_ops_v4,
-			  0, RPC_TASK_SOFTCONN, filp);
+			  0, RPC_TASK_SOFTCONN);
 	put_cred(ds_cred);
 	return PNFS_ATTEMPTED;
 
@@ -1890,13 +1815,11 @@ out_failed:
 
 /* Perform async writes. */
 static enum pnfs_try_status
-ff_layout_write_pagelist(struct nfs_pageio_descriptor *desc,
-			 struct nfs_pgio_header *hdr, int sync)
+ff_layout_write_pagelist(struct nfs_pgio_header *hdr, int sync)
 {
 	struct pnfs_layout_segment *lseg = hdr->lseg;
 	struct nfs4_pnfs_ds *ds;
 	struct rpc_clnt *ds_clnt;
-	struct file *filp;
 	struct nfs4_ff_layout_mirror *mirror;
 	const struct cred *ds_cred;
 	loff_t offset = hdr->args.offset;
@@ -1941,20 +1864,11 @@ ff_layout_write_pagelist(struct nfs_pageio_descriptor *desc,
 	 */
 	hdr->args.offset = offset;
 
-	/* Start IO accounting for local write */
-	filp = ff_local_open_fh(lseg, idx, ds->ds_clp, ds_cred, fh,
-				FMODE_READ|FMODE_WRITE);
-	if (filp) {
-		hdr->task.tk_start = ktime_get();
-		ff_layout_write_record_layoutstats_start(&hdr->task, hdr);
-	}
-
 	/* Perform an asynchronous write */
-	nfs_initiate_pgio(desc, ds->ds_clp, ds_clnt, hdr, ds_cred,
-			  ds->ds_clp->rpc_ops,
+	nfs_initiate_pgio(ds_clnt, hdr, ds_cred, ds->ds_clp->rpc_ops,
 			  vers == 3 ? &ff_layout_write_call_ops_v3 :
 				      &ff_layout_write_call_ops_v4,
-			  sync, RPC_TASK_SOFTCONN, filp);
+			  sync, RPC_TASK_SOFTCONN);
 	put_cred(ds_cred);
 	return PNFS_ATTEMPTED;
 
@@ -1988,7 +1902,6 @@ static int ff_layout_initiate_commit(struct nfs_commit_data *data, int how)
 	struct pnfs_layout_segment *lseg = data->lseg;
 	struct nfs4_pnfs_ds *ds;
 	struct rpc_clnt *ds_clnt;
-	struct file *filp;
 	struct nfs4_ff_layout_mirror *mirror;
 	const struct cred *ds_cred;
 	u32 idx;
@@ -2027,18 +1940,10 @@ static int ff_layout_initiate_commit(struct nfs_commit_data *data, int how)
 	if (fh)
 		data->args.fh = fh;
 
-	/* Start IO accounting for local commit */
-	filp = ff_local_open_fh(lseg, idx, ds->ds_clp, ds_cred, fh,
-				FMODE_READ|FMODE_WRITE);
-	if (filp) {
-		data->task.tk_start = ktime_get();
-		ff_layout_commit_record_layoutstats_start(&data->task, data);
-	}
-
-	ret = nfs_initiate_commit(ds->ds_clp, ds_clnt, data, ds->ds_clp->rpc_ops,
+	ret = nfs_initiate_commit(ds_clnt, data, ds->ds_clp->rpc_ops,
 				   vers == 3 ? &ff_layout_commit_call_ops_v3 :
 					       &ff_layout_commit_call_ops_v4,
-				   how, RPC_TASK_SOFTCONN, filp);
+				   how, RPC_TASK_SOFTCONN);
 	put_cred(ds_cred);
 	return ret;
 out_err:
@@ -2340,7 +2245,36 @@ ff_layout_ntop6_noscopeid(const struct sockaddr *sap, char *buf,
 	const struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)sap;
 	const struct in6_addr *addr = &sin6->sin6_addr;
 
-	return rpc_ntop6_addr_noscopeid(addr, buf, buflen);
+	/*
+	 * RFC 4291, Section 2.2.2
+	 *
+	 * Shorthanded ANY address
+	 */
+	if (ipv6_addr_any(addr))
+		return snprintf(buf, buflen, "::");
+
+	/*
+	 * RFC 4291, Section 2.2.2
+	 *
+	 * Shorthanded loopback address
+	 */
+	if (ipv6_addr_loopback(addr))
+		return snprintf(buf, buflen, "::1");
+
+	/*
+	 * RFC 4291, Section 2.2.3
+	 *
+	 * Special presentation address format for mapped v4
+	 * addresses.
+	 */
+	if (ipv6_addr_v4mapped(addr))
+		return snprintf(buf, buflen, "::ffff:%pI4",
+					&addr->s6_addr32[3]);
+
+	/*
+	 * RFC 4291, Section 2.2.1
+	 */
+	return snprintf(buf, buflen, "%pI6c", addr);
 }
 
 /* Derived from rpc_sockaddr2uaddr */
@@ -2350,6 +2284,7 @@ ff_layout_encode_netaddr(struct xdr_stream *xdr, struct nfs4_pnfs_ds_addr *da)
 	struct sockaddr *sap = (struct sockaddr *)&da->da_addr;
 	char portbuf[RPCBIND_MAXUADDRPLEN];
 	char addrbuf[RPCBIND_MAXUADDRLEN];
+	char *netid;
 	unsigned short port;
 	int len, netid_len;
 	__be32 *p;
@@ -2359,13 +2294,18 @@ ff_layout_encode_netaddr(struct xdr_stream *xdr, struct nfs4_pnfs_ds_addr *da)
 		if (ff_layout_ntop4(sap, addrbuf, sizeof(addrbuf)) == 0)
 			return;
 		port = ntohs(((struct sockaddr_in *)sap)->sin_port);
+		netid = "tcp";
+		netid_len = 3;
 		break;
 	case AF_INET6:
 		if (ff_layout_ntop6_noscopeid(sap, addrbuf, sizeof(addrbuf)) == 0)
 			return;
 		port = ntohs(((struct sockaddr_in6 *)sap)->sin6_port);
+		netid = "tcp6";
+		netid_len = 4;
 		break;
 	default:
+		/* we only support tcp and tcp6 */
 		WARN_ON_ONCE(1);
 		return;
 	}
@@ -2373,9 +2313,8 @@ ff_layout_encode_netaddr(struct xdr_stream *xdr, struct nfs4_pnfs_ds_addr *da)
 	snprintf(portbuf, sizeof(portbuf), ".%u.%u", port >> 8, port & 0xff);
 	len = strlcat(addrbuf, portbuf, sizeof(addrbuf));
 
-	netid_len = strlen(da->da_netid);
 	p = xdr_reserve_space(xdr, 4 + netid_len);
-	xdr_encode_opaque(p, da->da_netid, netid_len);
+	xdr_encode_opaque(p, netid, netid_len);
 
 	p = xdr_reserve_space(xdr, 4 + len);
 	xdr_encode_opaque(p, addrbuf, len);

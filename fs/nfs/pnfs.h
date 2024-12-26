@@ -51,8 +51,6 @@ struct nfs4_pnfs_ds_addr {
 	size_t			da_addrlen;
 	struct list_head	da_node;  /* nfs4_pnfs_dev_hlist dev_dslist */
 	char			*da_remotestr;	/* human readable addr+port */
-	const char		*da_netid;
-	int			da_transport;
 };
 
 struct nfs4_pnfs_ds {
@@ -82,6 +80,10 @@ enum pnfs_try_status {
 	PNFS_TRY_AGAIN     = 2,
 };
 
+/* error codes for internal use */
+#define NFS4ERR_RESET_TO_MDS   12001
+#define NFS4ERR_RESET_TO_PNFS  12002
+
 #ifdef CONFIG_NFS_V4_1
 
 #define LAYOUT_NFSV4_1_MODULE_PREFIX "nfs-layouttype4"
@@ -93,10 +95,6 @@ enum pnfs_try_status {
 #define NFS4_DEF_DS_TIMEO   600 /* in tenths of a second */
 #define NFS4_DEF_DS_RETRANS 5
 #define PNFS_DEVICE_RETRY_TIMEOUT (120*HZ)
-
-/* error codes for internal use */
-#define NFS4ERR_RESET_TO_MDS   12001
-#define NFS4ERR_RESET_TO_PNFS  12002
 
 enum {
 	NFS_LAYOUT_RO_FAILED = 0,	/* get ro layout failed stop trying */
@@ -159,10 +157,8 @@ struct pnfs_layoutdriver_type {
 	 * Return PNFS_ATTEMPTED to indicate the layout code has attempted
 	 * I/O, else return PNFS_NOT_ATTEMPTED to fall back to normal NFS
 	 */
-	enum pnfs_try_status (*read_pagelist)(struct nfs_pageio_descriptor *,
-					      struct nfs_pgio_header *);
-	enum pnfs_try_status (*write_pagelist)(struct nfs_pageio_descriptor *,
-					       struct nfs_pgio_header *, int);
+	enum pnfs_try_status (*read_pagelist)(struct nfs_pgio_header *);
+	enum pnfs_try_status (*write_pagelist)(struct nfs_pgio_header *, int);
 
 	void (*free_deviceid_node) (struct nfs4_deviceid_node *);
 	struct nfs4_deviceid_node * (*alloc_deviceid_node)
@@ -486,12 +482,18 @@ pnfs_get_ds_info(struct inode *inode)
 }
 
 static inline void
-pnfs_init_ds_commit_info(struct pnfs_ds_commit_info *fl_cinfo, struct inode *inode)
+pnfs_init_ds_commit_info_ops(struct pnfs_ds_commit_info *fl_cinfo, struct inode *inode)
 {
 	struct pnfs_ds_commit_info *inode_cinfo = pnfs_get_ds_info(inode);
+	if (inode_cinfo != NULL)
+		fl_cinfo->ops = inode_cinfo->ops;
+}
 
+static inline void
+pnfs_init_ds_commit_info(struct pnfs_ds_commit_info *fl_cinfo)
+{
 	INIT_LIST_HEAD(&fl_cinfo->commits);
-	fl_cinfo->ops = (inode_cinfo != NULL) ? inode_cinfo->ops : NULL;
+	fl_cinfo->ops = NULL;
 }
 
 static inline void
@@ -766,7 +768,7 @@ pnfs_roc(struct inode *ino,
 }
 
 static inline int
-pnfs_roc_done(struct rpc_task *task, struct inode *inode,
+pnfs_roc_done(struct rpc_task *task,
 		struct nfs4_layoutreturn_args **argpp,
 		struct nfs4_layoutreturn_res **respp,
 		int *ret)
@@ -811,9 +813,13 @@ pnfs_get_ds_info(struct inode *inode)
 }
 
 static inline void
-pnfs_init_ds_commit_info(struct pnfs_ds_commit_info *fl_cinfo, struct inode *inode)
+pnfs_init_ds_commit_info_ops(struct pnfs_ds_commit_info *fl_cinfo, struct inode *inode)
 {
-	INIT_LIST_HEAD(&fl_cinfo->commits);
+}
+
+static inline void
+pnfs_init_ds_commit_info(struct pnfs_ds_commit_info *fl_cinfo)
+{
 }
 
 static inline void

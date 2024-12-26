@@ -20,22 +20,19 @@
 #define NFSD_MAY_TRUNC			0x010
 #define NFSD_MAY_LOCK			0x020
 #define NFSD_MAY_MASK			0x03f
-#define NFSD_MAY_CREATE_FILE		0x103 /* == MAY_{EXEC|WRITE|CREATE_FILE} */
-#define NFSD_MAY_CREATE_DIR		0x203 /* == MAY_{EXEC|WRITE|CREATE_DIR} */
 
 /* extra hints to permission and open routines: */
-#define NFSD_MAY_OWNER_OVERRIDE		0x04000
-#define NFSD_MAY_LOCAL_ACCESS		0x08000 /* for device special files */
-#define NFSD_MAY_BYPASS_GSS_ON_ROOT	0x10000
-#define NFSD_MAY_NOT_BREAK_LEASE	0x20000
-#define NFSD_MAY_BYPASS_GSS		0x40000
-#define NFSD_MAY_READ_IF_EXEC		0x80000
+#define NFSD_MAY_OWNER_OVERRIDE		0x040
+#define NFSD_MAY_LOCAL_ACCESS		0x080 /* for device special files */
+#define NFSD_MAY_BYPASS_GSS_ON_ROOT	0x100
+#define NFSD_MAY_NOT_BREAK_LEASE	0x200
+#define NFSD_MAY_BYPASS_GSS		0x400
+#define NFSD_MAY_READ_IF_EXEC		0x800
 
-#define NFSD_MAY_64BIT_COOKIE		0x100000 /* 64 bit readdir cookies for >= NFSv3 */
+#define NFSD_MAY_64BIT_COOKIE		0x1000 /* 64 bit readdir cookies for >= NFSv3 */
 
+#define NFSD_MAY_CREATE		(NFSD_MAY_EXEC|NFSD_MAY_WRITE)
 #define NFSD_MAY_REMOVE		(NFSD_MAY_EXEC|NFSD_MAY_WRITE|NFSD_MAY_TRUNC)
-
-#define NFSD_MAY_LOCALIO		0x800000
 
 struct nfsd_file;
 
@@ -53,15 +50,14 @@ __be32		 nfsd_lookup_dentry(struct svc_rqst *, struct svc_fh *,
 				const char *, unsigned int,
 				struct svc_export **, struct dentry **);
 __be32		nfsd_setattr(struct svc_rqst *, struct svc_fh *,
-				struct iattr *, int, time_t);
+				struct iattr *, int, time64_t);
 int nfsd_mountpoint(struct dentry *, struct svc_export *);
 #ifdef CONFIG_NFSD_V4
 __be32          nfsd4_set_nfs4_label(struct svc_rqst *, struct svc_fh *,
 		    struct xdr_netobj *);
 __be32		nfsd4_vfs_fallocate(struct svc_rqst *, struct svc_fh *,
 				    struct file *, loff_t, loff_t, int);
-__be32		nfsd4_clone_file_range(struct svc_rqst *,
-				       struct nfsd_file *nf_src, u64 src_pos,
+__be32		nfsd4_clone_file_range(struct nfsd_file *nf_src, u64 src_pos,
 				       struct nfsd_file *nf_dst, u64 dst_pos,
 				       u64 count, bool sync);
 #endif /* CONFIG_NFSD_V4 */
@@ -80,6 +76,16 @@ __be32		do_nfsd_create(struct svc_rqst *, struct svc_fh *,
 __be32		nfsd_commit(struct svc_rqst *, struct svc_fh *,
 				loff_t, unsigned long, __be32 *verf);
 #endif /* CONFIG_NFSD_V3 */
+#ifdef CONFIG_NFSD_V4
+__be32		nfsd_getxattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
+			    char *name, void **bufp, int *lenp);
+__be32		nfsd_listxattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
+			    char **bufp, int *lenp);
+__be32		nfsd_removexattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
+			    char *name);
+__be32		nfsd_setxattr(struct svc_rqst *rqstp, struct svc_fh *fhp,
+			    char *name, void *buf, u32 len, u32 flags);
+#endif
 int 		nfsd_open_break_lease(struct inode *, int);
 __be32		nfsd_open(struct svc_rqst *, struct svc_fh *, umode_t,
 				int, struct file **);
@@ -126,8 +132,6 @@ __be32		nfsd_statfs(struct svc_rqst *, struct svc_fh *,
 __be32		nfsd_permission(struct svc_rqst *, struct svc_export *,
 				struct dentry *, int);
 
-__be32		nfsd_getattr(struct path *p, struct kstat *, bool);
-
 static inline int fh_want_write(struct svc_fh *fh)
 {
 	int ret;
@@ -152,7 +156,8 @@ static inline __be32 fh_getattr(struct svc_fh *fh, struct kstat *stat)
 {
 	struct path p = {.mnt = fh->fh_export->ex_path.mnt,
 			 .dentry = fh->fh_dentry};
-	return nfsd_getattr(&p, stat, true);
+	return nfserrno(vfs_getattr(&p, stat, STATX_BASIC_STATS,
+				    AT_STATX_SYNC_AS_STAT));
 }
 
 static inline int nfsd_create_is_exclusive(int createmode)

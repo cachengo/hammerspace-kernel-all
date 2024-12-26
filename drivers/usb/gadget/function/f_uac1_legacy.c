@@ -54,8 +54,8 @@ static struct uac1_ac_header_descriptor_1 ac_header_desc = {
 	.bLength =		UAC_DT_AC_HEADER_LENGTH,
 	.bDescriptorType =	USB_DT_CS_INTERFACE,
 	.bDescriptorSubtype =	UAC_HEADER,
-	.bcdADC =		__constant_cpu_to_le16(0x0100),
-	.wTotalLength =		__constant_cpu_to_le16(UAC_DT_TOTAL_LENGTH),
+	.bcdADC =		cpu_to_le16(0x0100),
+	.wTotalLength =		cpu_to_le16(UAC_DT_TOTAL_LENGTH),
 	.bInCollection =	F_AUDIO_NUM_INTERFACES,
 	.baInterfaceNr = {
 	/* Interface number of the first AudioStream interface */
@@ -183,7 +183,7 @@ static struct uac_iso_endpoint_descriptor as_iso_out_desc = {
 	.bDescriptorSubtype =	UAC_EP_GENERAL,
 	.bmAttributes = 	1,
 	.bLockDelayUnits =	1,
-	.wLockDelay =		__constant_cpu_to_le16(1),
+	.wLockDelay =		cpu_to_le16(1),
 };
 
 static struct usb_descriptor_header *f_audio_desc[] = {
@@ -336,7 +336,9 @@ static int f_audio_out_ep_complete(struct usb_ep *ep, struct usb_request *req)
 
 	/* Copy buffer is full, add it to the play_queue */
 	if (audio_buf_size - copy_buf->actual < req->actual) {
+		spin_lock_irq(&audio->lock);
 		list_add_tail(&copy_buf->list, &audio->play_queue);
+		spin_unlock_irq(&audio->lock);
 		schedule_work(&audio->playback_work);
 		copy_buf = f_audio_buffer_alloc(audio_buf_size);
 		if (IS_ERR(copy_buf))
@@ -668,6 +670,11 @@ static int f_audio_get_alt(struct usb_function *f, unsigned intf)
 
 static void f_audio_disable(struct usb_function *f)
 {
+	struct f_audio *audio = func_to_audio(f);
+	struct usb_ep *out_ep = audio->out_ep;
+
+	usb_ep_disable(out_ep);
+
 	return;
 }
 
@@ -751,8 +758,6 @@ f_audio_bind(struct usb_configuration *c, struct usb_function *f)
 		goto fail;
 	audio->out_ep = ep;
 	audio->out_ep->desc = &as_out_ep_desc;
-
-	status = -ENOMEM;
 
 	/* copy descriptors, and track endpoint copies */
 	status = usb_assign_descriptors(f, f_audio_desc, f_audio_desc, NULL,
@@ -968,6 +973,7 @@ static void f_audio_free(struct usb_function *f)
 
 	gaudio_cleanup(&audio->card);
 	opts = container_of(f->fi, struct f_uac1_legacy_opts, func_inst);
+	opts->bound = false;
 	kfree(audio);
 	mutex_lock(&opts->lock);
 	--opts->refcnt;

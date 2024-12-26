@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/fs/file_table.c
  *
@@ -79,14 +80,14 @@ EXPORT_SYMBOL_GPL(get_max_files);
  */
 #if defined(CONFIG_SYSCTL) && defined(CONFIG_PROC_FS)
 int proc_nr_files(struct ctl_table *table, int write,
-                     void __user *buffer, size_t *lenp, loff_t *ppos)
+                     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	files_stat.nr_files = get_nr_files();
 	return proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
 }
 #else
 int proc_nr_files(struct ctl_table *table, int write,
-                     void __user *buffer, size_t *lenp, loff_t *ppos)
+                     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	return -ENOSYS;
 }
@@ -197,6 +198,7 @@ static struct file *alloc_file(const struct path *path, int flags,
 	file->f_inode = path->dentry->d_inode;
 	file->f_mapping = path->dentry->d_inode->i_mapping;
 	file->f_wb_err = filemap_sample_wb_err(file->f_mapping);
+	file->f_sb_err = file_sample_sb_err(file);
 	if ((file->f_mode & FMODE_READ) &&
 	     likely(fop->read || fop->read_iter))
 		file->f_mode |= FMODE_CAN_READ;
@@ -312,8 +314,6 @@ static void ____fput(struct callback_head *work)
 	__fput(container_of(work, struct file, f_u.fu_rcuhead));
 }
 
-static DECLARE_DELAYED_WORK(delayed_fput_work, delayed_fput);
-
 /*
  * If kernel thread really needs to have the final fput() it has done
  * to complete, call this.  The only user right now is the boot - we
@@ -326,9 +326,11 @@ static DECLARE_DELAYED_WORK(delayed_fput_work, delayed_fput);
  */
 void flush_delayed_fput(void)
 {
-	flush_delayed_work(&delayed_fput_work);
+	delayed_fput(NULL);
 }
 EXPORT_SYMBOL_GPL(flush_delayed_fput);
+
+static DECLARE_DELAYED_WORK(delayed_fput_work, delayed_fput);
 
 void fput_many(struct file *file, unsigned int refs)
 {
@@ -337,7 +339,7 @@ void fput_many(struct file *file, unsigned int refs)
 
 		if (likely(!in_interrupt() && !(task->flags & PF_KTHREAD))) {
 			init_task_work(&file->f_u.fu_rcuhead, ____fput);
-			if (!task_work_add(task, &file->f_u.fu_rcuhead, true))
+			if (!task_work_add(task, &file->f_u.fu_rcuhead, TWA_RESUME))
 				return;
 			/*
 			 * After this task has run exit_task_work(),
@@ -351,30 +353,10 @@ void fput_many(struct file *file, unsigned int refs)
 	}
 }
 
-/**
- * fput - put a struct file reference
- * @file: file of which to put the reference
- *
- * This function decrements the reference count for the struct file reference,
- * and queues it up for destruction if the count goes to zero. In the case of
- * most tasks we queue it to the task_work infrastructure, which will be run
- * just before the task returns back to userspace. kthreads however never
- * return to userspace, so for those we add them to a global list and schedule
- * a delayed workqueue job to do the final cleanup work.
- *
- * Why not just do it synchronously? __fput can involve taking locks of all
- * sorts, and doing it synchronously means that the callers must take extra care
- * not to deadlock. That can be very difficult to ensure, so by deferring it
- * until just before return to userland or to the workqueue, we sidestep that
- * nastiness. Also, __fput can be quite stack intensive, so doing a final fput
- * has the possibility of blowing up if we don't take steps to ensure that we
- * have enough stack space to make it work.
- */
 void fput(struct file *file)
 {
 	fput_many(file, 1);
 }
-EXPORT_SYMBOL(fput);
 
 /*
  * synchronous analog of fput(); for kernel threads that might be needed
@@ -393,6 +375,7 @@ void __fput_sync(struct file *file)
 	}
 }
 
+EXPORT_SYMBOL(fput);
 
 void __init files_init(void)
 {

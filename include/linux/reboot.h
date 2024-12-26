@@ -14,6 +14,7 @@ struct device;
 #define SYS_POWER_OFF	0x0003	/* Notify of system power off */
 
 enum reboot_mode {
+	REBOOT_UNDEFINED = -1,
 	REBOOT_COLD = 0,
 	REBOOT_WARM,
 	REBOOT_HARD,
@@ -21,6 +22,7 @@ enum reboot_mode {
 	REBOOT_GPIO,
 };
 extern enum reboot_mode reboot_mode;
+extern enum reboot_mode panic_reboot_mode;
 
 enum reboot_type {
 	BOOT_TRIPLE	= 't',
@@ -46,6 +48,26 @@ extern int devm_register_reboot_notifier(struct device *, struct notifier_block 
 extern int register_restart_handler(struct notifier_block *);
 extern int unregister_restart_handler(struct notifier_block *);
 extern void do_kernel_restart(char *cmd);
+
+#ifdef CONFIG_NO_GKI
+extern int register_pre_restart_handler(struct notifier_block *nb);
+extern int unregister_pre_restart_handler(struct notifier_block *nb);
+extern void do_kernel_pre_restart(char *cmd);
+#else
+static inline int register_pre_restart_handler(struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline int unregister_pre_restart_handler(struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline void do_kernel_pre_restart(char *cmd)
+{
+}
+#endif
 
 /*
  * Architecture-specific implementations of sys_reboot commands.

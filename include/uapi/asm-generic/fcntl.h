@@ -97,10 +97,6 @@
 #define O_NDELAY	O_NONBLOCK
 #endif
 
-#ifndef O_NOMODE
-#define O_NOMODE	010000000000
-#endif
-
 #define F_DUPFD		0	/* dup */
 #define F_GETFD		1	/* get close_on_exec */
 #define F_SETFD		2	/* set/clear close_on_exec */

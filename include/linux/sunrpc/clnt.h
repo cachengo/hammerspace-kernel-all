@@ -71,13 +71,14 @@ struct rpc_clnt {
 #if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
 	struct dentry		*cl_debugfs;	/* debugfs directory */
 #endif
-	struct rpc_xprt_iter	cl_xpi;
+	/* cl_work is only needed after cl_xpi is no longer used,
+	 * and that are of similar size
+	 */
+	union {
+		struct rpc_xprt_iter	cl_xpi;
+		struct work_struct	cl_work;
+	};
 	const struct cred	*cl_cred;
-
-	unsigned long		cl_idmap_flags;
-#define RPC_CLNT_IDMAP_FLAGS_IDMAP	0	/* idmap started */
-#define RPC_CLNT_IDMAP_FLAGS_NOXUID	1	/* dont use xuid/xgid */
-	struct idmap		*cl_idmap;	/* idmap context */
 };
 
 /*
@@ -113,8 +114,6 @@ struct rpc_procinfo {
 	u32			p_statidx;	/* Which procedure to account */
 	const char *		p_name;		/* name of procedure */
 };
-
-#ifdef __KERNEL__
 
 struct rpc_create_args {
 	struct net		*net;
@@ -170,6 +169,8 @@ void		rpc_shutdown_client(struct rpc_clnt *);
 void		rpc_release_client(struct rpc_clnt *);
 void		rpc_task_release_transport(struct rpc_task *);
 void		rpc_task_release_client(struct rpc_task *);
+struct rpc_xprt	*rpc_task_get_xprt(struct rpc_clnt *clnt,
+		struct rpc_xprt *xprt);
 
 int		rpcb_create_local(struct net *);
 void		rpcb_put_local(struct net *);
@@ -241,5 +242,9 @@ static inline int rpc_reply_expected(struct rpc_task *task)
 		(task->tk_msg.rpc_proc->p_decode != NULL);
 }
 
-#endif /* __KERNEL__ */
+static inline void rpc_task_close_connection(struct rpc_task *task)
+{
+	if (task->tk_xprt)
+		xprt_force_disconnect(task->tk_xprt);
+}
 #endif /* _LINUX_SUNRPC_CLNT_H */

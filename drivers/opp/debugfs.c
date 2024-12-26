@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic OPP debugfs interface
  *
  * Copyright (C) 2015-2016 Viresh Kumar <viresh.kumar@linaro.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -33,6 +30,47 @@ static void opp_set_dev_name(const struct device *dev, char *name)
 void opp_debug_remove_one(struct dev_pm_opp *opp)
 {
 	debugfs_remove_recursive(opp->dentry);
+}
+
+static ssize_t bw_name_read(struct file *fp, char __user *userbuf,
+			    size_t count, loff_t *ppos)
+{
+	struct icc_path *path = fp->private_data;
+	char buf[64];
+	int i;
+
+	i = scnprintf(buf, sizeof(buf), "%.62s\n", icc_get_name(path));
+
+	return simple_read_from_buffer(userbuf, count, ppos, buf, i);
+}
+
+static const struct file_operations bw_name_fops = {
+	.open = simple_open,
+	.read = bw_name_read,
+	.llseek = default_llseek,
+};
+
+static void opp_debug_create_bw(struct dev_pm_opp *opp,
+				struct opp_table *opp_table,
+				struct dentry *pdentry)
+{
+	struct dentry *d;
+	char name[11];
+	int i;
+
+	for (i = 0; i < opp_table->path_count; i++) {
+		snprintf(name, sizeof(name), "icc-path-%.1d", i);
+
+		/* Create per-path directory */
+		d = debugfs_create_dir(name, pdentry);
+
+		debugfs_create_file("name", S_IRUGO, d, opp_table->paths[i],
+				    &bw_name_fops);
+		debugfs_create_u32("peak_bw", S_IRUGO, d,
+				   &opp->bandwidth[i].peak);
+		debugfs_create_u32("avg_bw", S_IRUGO, d,
+				   &opp->bandwidth[i].avg);
+	}
 }
 
 static void opp_debug_create_supplies(struct dev_pm_opp *opp,
@@ -97,6 +135,7 @@ void opp_debug_create_one(struct dev_pm_opp *opp, struct opp_table *opp_table)
 			     &opp->clock_latency_ns);
 
 	opp_debug_create_supplies(opp, opp_table, d);
+	opp_debug_create_bw(opp, opp_table, d);
 
 	opp->dentry = d;
 }
@@ -200,10 +239,61 @@ out:
 	opp_dev->dentry = NULL;
 }
 
+static int opp_summary_show(struct seq_file *s, void *data)
+{
+	struct list_head *lists = (struct list_head *)s->private;
+	struct opp_table *opp_table;
+	struct dev_pm_opp *opp;
+
+	mutex_lock(&opp_table_lock);
+
+	seq_puts(s, " device                rate(Hz)    target(uV)    min(uV)    max(uV)\n");
+	seq_puts(s, "-------------------------------------------------------------------\n");
+
+	list_for_each_entry(opp_table, lists, node) {
+		seq_printf(s, " %s\n", opp_table->dentry_name);
+		mutex_lock(&opp_table->lock);
+		list_for_each_entry(opp, &opp_table->opp_list, node) {
+			if (!opp->available)
+				continue;
+			seq_printf(s, "%31lu %12lu %11lu %11lu\n",
+				   opp->rate,
+				   opp->supplies[0].u_volt,
+				   opp->supplies[0].u_volt_min,
+				   opp->supplies[0].u_volt_max);
+			if (opp_table->regulator_count > 1)
+				seq_printf(s, "%44lu %11lu %11lu\n",
+					   opp->supplies[1].u_volt,
+					   opp->supplies[1].u_volt_min,
+					   opp->supplies[1].u_volt_max);
+		}
+		mutex_unlock(&opp_table->lock);
+	}
+
+	mutex_unlock(&opp_table_lock);
+
+	return 0;
+}
+
+static int opp_summary_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, opp_summary_show, inode->i_private);
+}
+
+static const struct file_operations opp_summary_fops = {
+	.open		= opp_summary_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
 static int __init opp_debug_init(void)
 {
 	/* Create /sys/kernel/debug/opp directory */
 	rootdir = debugfs_create_dir("opp", NULL);
+
+	debugfs_create_file("opp_summary", 0444, rootdir, &opp_tables,
+			    &opp_summary_fops);
 
 	return 0;
 }

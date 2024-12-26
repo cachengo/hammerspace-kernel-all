@@ -84,9 +84,9 @@ static void reset(struct fbtft_par *par)
 
 	dev_dbg(par->info->device, "%s()\n", __func__);
 
-	gpiod_set_value(par->gpio.reset, 0);
-	udelay(20);
 	gpiod_set_value(par->gpio.reset, 1);
+	udelay(20);
+	gpiod_set_value(par->gpio.reset, 0);
 	mdelay(120);
 }
 
@@ -194,12 +194,12 @@ static void write_reg8_bus8(struct fbtft_par *par, int len, ...)
 	/* select chip */
 	if (*buf) {
 		/* cs1 */
-		gpiod_set_value(par->CS0, 1);
-		gpiod_set_value(par->CS1, 0);
-	} else {
-		/* cs0 */
 		gpiod_set_value(par->CS0, 0);
 		gpiod_set_value(par->CS1, 1);
+	} else {
+		/* cs0 */
+		gpiod_set_value(par->CS0, 1);
+		gpiod_set_value(par->CS1, 0);
 	}
 
 	gpiod_set_value(par->RS, 0); /* RS->0 (command mode) */
@@ -383,7 +383,7 @@ static int write_vmem(struct fbtft_par *par, size_t offset, size_t len)
 			/* select right side (sc1)
 			 * set addr
 			 */
-			write_reg(par, 0x01, 1 << 6);
+			write_reg(par, 0x01, BIT(6));
 			write_reg(par, 0x01, (0x17 << 3) | (u8)y);
 
 			/* write bitmap */
@@ -397,8 +397,8 @@ static int write_vmem(struct fbtft_par *par, size_t offset, size_t len)
 	}
 	kfree(convert_buf);
 
-	gpiod_set_value(par->CS0, 1);
-	gpiod_set_value(par->CS1, 1);
+	gpiod_set_value(par->CS0, 0);
+	gpiod_set_value(par->CS1, 0);
 
 	return ret;
 }
@@ -406,7 +406,7 @@ static int write_vmem(struct fbtft_par *par, size_t offset, size_t len)
 static int write(struct fbtft_par *par, void *buf, size_t len)
 {
 	fbtft_par_dbg_hex(DEBUG_WRITE, par, par->info->device, u8, buf, len,
-			  "%s(len=%d): ", __func__, len);
+			  "%s(len=%zu): ", __func__, len);
 
 	gpiod_set_value(par->RW, 0); /* set write mode */
 
@@ -419,10 +419,10 @@ static int write(struct fbtft_par *par, void *buf, size_t len)
 		for (i = 0; i < 8; ++i)
 			gpiod_set_value(par->gpio.db[i], data & (1 << i));
 		/* set E */
-		gpiod_set_value(par->EPIN, 1);
+		gpiod_set_value(par->EPIN, 0);
 		udelay(5);
 		/* unset E - write */
-		gpiod_set_value(par->EPIN, 0);
+		gpiod_set_value(par->EPIN, 1);
 		udelay(1);
 	}
 

@@ -1,14 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2014-2017 Linaro Ltd. <ard.biesheuvel@linaro.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/elf.h>
+#include <linux/ftrace.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/sort.h>
 
 static struct plt_entry __get_adrp_add_pair(u64 dst, u64 pc,
@@ -255,9 +254,44 @@ static unsigned int count_plts(Elf64_Sym *syms, Elf64_Rela *rela, int num,
 	return ret;
 }
 
+static bool branch_rela_needs_plt(Elf64_Sym *syms, Elf64_Rela *rela,
+				  Elf64_Word dstidx)
+{
+
+	Elf64_Sym *s = syms + ELF64_R_SYM(rela->r_info);
+
+	if (s->st_shndx == dstidx)
+		return false;
+
+	return ELF64_R_TYPE(rela->r_info) == R_AARCH64_JUMP26 ||
+	       ELF64_R_TYPE(rela->r_info) == R_AARCH64_CALL26;
+}
+
+/* Group branch PLT relas at the front end of the array. */
+static int partition_branch_plt_relas(Elf64_Sym *syms, Elf64_Rela *rela,
+				      int numrels, Elf64_Word dstidx)
+{
+	int i = 0, j = numrels - 1;
+
+	if (!IS_ENABLED(CONFIG_RANDOMIZE_BASE))
+		return 0;
+
+	while (i < j) {
+		if (branch_rela_needs_plt(syms, &rela[i], dstidx))
+			i++;
+		else if (branch_rela_needs_plt(syms, &rela[j], dstidx))
+			swap(rela[i], rela[j]);
+		else
+			j--;
+	}
+
+	return i;
+}
+
 int module_frob_arch_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 			      char *secstrings, struct module *mod)
 {
+	bool copy_rela_for_fips140 = false;
 	unsigned long core_plts = 0;
 	unsigned long init_plts = 0;
 	Elf64_Sym *syms = NULL;
@@ -273,8 +307,7 @@ int module_frob_arch_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 			mod->arch.core.plt_shndx = i;
 		else if (!strcmp(secstrings + sechdrs[i].sh_name, ".init.plt"))
 			mod->arch.init.plt_shndx = i;
-		else if (IS_ENABLED(CONFIG_DYNAMIC_FTRACE) &&
-			 !strcmp(secstrings + sechdrs[i].sh_name,
+		else if (!strcmp(secstrings + sechdrs[i].sh_name,
 				 ".text.ftrace_trampoline"))
 			tramp = sechdrs + i;
 		else if (sechdrs[i].sh_type == SHT_SYMTAB)
@@ -290,22 +323,60 @@ int module_frob_arch_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 		return -ENOEXEC;
 	}
 
+	if (IS_ENABLED(CONFIG_CRYPTO_FIPS140) &&
+	    !strcmp(mod->name, "fips140"))
+		copy_rela_for_fips140 = true;
+
 	for (i = 0; i < ehdr->e_shnum; i++) {
 		Elf64_Rela *rels = (void *)ehdr + sechdrs[i].sh_offset;
-		int numrels = sechdrs[i].sh_size / sizeof(Elf64_Rela);
+		int nents, numrels = sechdrs[i].sh_size / sizeof(Elf64_Rela);
 		Elf64_Shdr *dstsec = sechdrs + sechdrs[i].sh_info;
 
 		if (sechdrs[i].sh_type != SHT_RELA)
 			continue;
 
+#ifdef CONFIG_CRYPTO_FIPS140
+		if (copy_rela_for_fips140 &&
+		    !strcmp(secstrings + dstsec->sh_name, ".rodata")) {
+			void *p = kmemdup(rels, numrels * sizeof(Elf64_Rela),
+					  GFP_KERNEL);
+			if (!p) {
+				pr_err("fips140: failed to allocate .rodata RELA buffer\n");
+				return -ENOMEM;
+			}
+			mod->arch.rodata_relocations = p;
+			mod->arch.num_rodata_relocations = numrels;
+		}
+#endif
+
 		/* ignore relocations that operate on non-exec sections */
 		if (!(dstsec->sh_flags & SHF_EXECINSTR))
 			continue;
 
-		/* sort by type, symbol index and addend */
-		sort(rels, numrels, sizeof(Elf64_Rela), cmp_rela, NULL);
+#ifdef CONFIG_CRYPTO_FIPS140
+		if (copy_rela_for_fips140 &&
+		    !strcmp(secstrings + dstsec->sh_name, ".text")) {
+			void *p = kmemdup(rels, numrels * sizeof(Elf64_Rela),
+					  GFP_KERNEL);
+			if (!p) {
+				pr_err("fips140: failed to allocate .text RELA buffer\n");
+				return -ENOMEM;
+			}
+			mod->arch.text_relocations = p;
+			mod->arch.num_text_relocations = numrels;
+		}
+#endif
 
-		if (strncmp(secstrings + dstsec->sh_name, ".init", 5) != 0)
+		/*
+		 * sort branch relocations requiring a PLT by type, symbol index
+		 * and addend
+		 */
+		nents = partition_branch_plt_relas(syms, rels, numrels,
+						   sechdrs[i].sh_info);
+		if (nents)
+			sort(rels, nents, sizeof(Elf64_Rela), cmp_rela, NULL);
+
+		if (!str_has_prefix(secstrings + dstsec->sh_name, ".init"))
 			core_plts += count_plts(syms, rels, numrels,
 						sechdrs[i].sh_info, dstsec);
 		else
@@ -333,7 +404,7 @@ int module_frob_arch_sections(Elf_Ehdr *ehdr, Elf_Shdr *sechdrs,
 		tramp->sh_type = SHT_NOBITS;
 		tramp->sh_flags = SHF_EXECINSTR | SHF_ALLOC;
 		tramp->sh_addralign = __alignof__(struct plt_entry);
-		tramp->sh_size = sizeof(struct plt_entry);
+		tramp->sh_size = NR_FTRACE_PLTS * sizeof(struct plt_entry);
 	}
 
 	return 0;

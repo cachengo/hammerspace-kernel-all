@@ -43,16 +43,12 @@ struct svc_pool {
 	spinlock_t		sp_lock;	/* protects all fields */
 	struct list_head	sp_sockets;	/* pending sockets */
 	unsigned int		sp_nrthreads;	/* # of threads in pool */
-	unsigned int		sp_tmpthreads;	/* # of tmp threads in pool */
 	struct list_head	sp_all_threads;	/* all server threads */
 	struct svc_pool_stats	sp_stats;	/* statistics on pool operation */
 #define	SP_TASK_PENDING		(0)		/* still work to do even if no
 						 * xprt is queued. */
 #define SP_CONGESTED		(1)
 	unsigned long		sp_flags;
-	atomic_t		sp_need_rescue;	/* # of queued xprts that
-						 * might need rescuing */
-	atomic_t		sp_rescue_inuse;
 } ____cacheline_aligned_in_smp;
 
 struct svc_serv;
@@ -63,11 +59,6 @@ struct svc_serv_ops {
 
 	/* function for service threads to run */
 	int		(*svo_function)(void *);
-
-	/* service function that does the same as svo_function yet only runs
-	 * for a while.  Use by pool manager to dynamically increase # of
-	 * threads in a pool */
-	int		(*svo_run_once)(void *);
 
 	/* queue up a transport for servicing */
 	void		(*svo_enqueue_xprt)(struct svc_xprt *);
@@ -93,14 +84,14 @@ struct svc_serv {
 	struct svc_program *	sv_program;	/* RPC program */
 	struct svc_stat *	sv_stats;	/* RPC statistics */
 	spinlock_t		sv_lock;
-	atomic_t		sv_refcount;	/* refcount */
+	unsigned int		sv_nrthreads;	/* # of server threads */
 	unsigned int		sv_maxconn;	/* max connections allowed or
 						 * '0' causing max to be based
 						 * on number of threads. */
+
 	unsigned int		sv_max_payload;	/* datagram payload size */
 	unsigned int		sv_max_mesg;	/* max_payload + 1 page for overheads */
 	unsigned int		sv_xdrsize;	/* XDR buffer size */
-	unsigned int		sv_max_inflight;/* max number of in-flight RPCs per xprt */
 	struct list_head	sv_permsocks;	/* all permanent sockets */
 	struct list_head	sv_tempsocks;	/* all temporary sockets */
 	int			sv_tmpcnt;	/* count of temporary sockets */
@@ -108,10 +99,8 @@ struct svc_serv {
 
 	char *			sv_name;	/* service name */
 
-	struct mutex		sv_pool_mutex;	/* Protect thread create/destroy */
 	unsigned int		sv_nrpools;	/* number of thread pools */
 	struct svc_pool *	sv_pools;	/* array of thread pools */
-	struct task_struct	*sv_pool_mgr;	/* pool manager thread */
 	const struct svc_serv_ops *sv_ops;	/* server operations */
 #if defined(CONFIG_SUNRPC_BACKCHANNEL)
 	struct list_head	sv_cb_list;	/* queue for callback requests
@@ -125,14 +114,14 @@ struct svc_serv {
 };
 
 /*
- * We use sv_refcount as a reference count.  svc_destroy() drops
+ * We use sv_nrthreads as a reference count.  svc_destroy() drops
  * this refcount, so we need to bump it up around operations that
  * change the number of threads.  Horrible, but there it is.
  * Should be called with the "service mutex" held.
  */
 static inline void svc_get(struct svc_serv *serv)
 {
-	atomic_inc(&serv->sv_refcount);
+	serv->sv_nrthreads++;
 }
 
 /*
@@ -265,6 +254,7 @@ struct svc_rqst {
 	struct page *		*rq_page_end;  /* one past the last page */
 
 	struct kvec		rq_vec[RPCSVC_MAXPAGES]; /* generally useful.. */
+	struct bio_vec		rq_bvec[RPCSVC_MAXPAGES];
 
 	__be32			rq_xid;		/* transmission id */
 	u32			rq_prog;	/* program number */
@@ -283,7 +273,6 @@ struct svc_rqst {
 #define	RQ_BUSY		(6)			/* request is busy */
 #define	RQ_DATA		(7)			/* request has data */
 #define RQ_AUTHERR	(8)			/* Request status is auth error */
-#define	RQ_RESCUE	(9)			/* Rescue thread */
 	unsigned long		rq_flags;	/* flags field */
 	ktime_t			rq_qtime;	/* enqueue time */
 
@@ -311,6 +300,7 @@ struct svc_rqst {
 	struct net		*rq_bc_net;	/* pointer to backchannel's
 						 * net namespace
 						 */
+	void **			rq_lease_breaker; /* The v4 client breaking a lease */
 };
 
 #define SVC_NET(rqst) (rqst->rq_xprt ? rqst->rq_xprt->xpt_net : rqst->rq_bc_net)
@@ -392,7 +382,7 @@ struct svc_deferred_req {
 	struct cache_deferred_req handle;
 	size_t			xprt_hlen;
 	int			argslen;
-	__be32			args[0];
+	__be32			args[];
 };
 
 struct svc_process_info {
@@ -516,7 +506,6 @@ struct svc_serv *  svc_create_pooled(struct svc_program *, unsigned int,
 			const struct svc_serv_ops *);
 int		   svc_set_num_threads(struct svc_serv *, struct svc_pool *, int);
 int		   svc_set_num_threads_sync(struct svc_serv *, struct svc_pool *, int);
-int		   svc_get_num_threads(struct svc_serv *, struct svc_pool *);
 int		   svc_pool_stats_open(struct svc_serv *serv, struct file *file);
 void		   svc_destroy(struct svc_serv *);
 void		   svc_shutdown_net(struct svc_serv *, struct net *);
@@ -530,6 +519,15 @@ void		   svc_wake_up(struct svc_serv *);
 void		   svc_reserve(struct svc_rqst *rqstp, int space);
 struct svc_pool *  svc_pool_for_cpu(struct svc_serv *serv, int cpu);
 char *		   svc_print_addr(struct svc_rqst *, char *, size_t);
+int		   svc_encode_read_payload(struct svc_rqst *rqstp,
+					   unsigned int offset,
+					   unsigned int length);
+unsigned int	   svc_fill_write_vector(struct svc_rqst *rqstp,
+					 struct page **pages,
+					 struct kvec *first, size_t total);
+char		  *svc_fill_symlink_pathname(struct svc_rqst *rqstp,
+					     struct kvec *first, void *p,
+					     size_t total);
 __be32		   svc_return_autherr(struct svc_rqst *rqstp, __be32 auth_err);
 __be32		   svc_generic_init_request(struct svc_rqst *rqstp,
 					    const struct svc_program *progp,
@@ -544,12 +542,6 @@ int		   svc_rpcbind_set_version(struct net *net,
 					   u32 version, int family,
 					   unsigned short proto,
 					   unsigned short port);
-unsigned int	   svc_fill_write_vector(struct svc_rqst *rqstp,
-					 struct page **pages,
-					 struct kvec *first, size_t total);
-char		  *svc_fill_symlink_pathname(struct svc_rqst *rqstp,
-					     struct kvec *first, void *p,
-					     size_t total);
 
 #define	RPC_MAX_ADDRBUFLEN	(63U)
 
@@ -563,16 +555,6 @@ char		  *svc_fill_symlink_pathname(struct svc_rqst *rqstp,
 static inline void svc_reserve_auth(struct svc_rqst *rqstp, int space)
 {
 	svc_reserve(rqstp, space + rqstp->rq_auth_slack);
-}
-
-static inline bool svc_xprt_check_need_rescue(struct svc_pool *pool)
-{
-#if 0 /* FIXME: remove when containerised knfsd is stable */
-	return atomic_read(&pool->sp_need_rescue) > (int)pool->sp_tmpthreads -
-			atomic_read(&pool->sp_rescue_inuse);
-#else
-	return false;
-#endif
 }
 
 #endif /* SUNRPC_SVC_H */

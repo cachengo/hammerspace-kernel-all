@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Common NFS I/O  operations for the pnfs file based
  * layout drivers.
@@ -531,11 +532,10 @@ pnfs_generic_commit_pagelist(struct inode *inode, struct list_head *mds_pages,
 		list_del(&data->list);
 		if (data->ds_commit_index < 0) {
 			nfs_init_commit(data, NULL, NULL, cinfo);
-			nfs_initiate_commit(NFS_SERVER(inode)->nfs_client,
-					    NFS_CLIENT(inode), data,
+			nfs_initiate_commit(NFS_CLIENT(inode), data,
 					    NFS_PROTO(data->inode),
 					    data->mds_ops, how,
-					    RPC_TASK_CRED_NOREF, false);
+					    RPC_TASK_CRED_NOREF);
 		} else {
 			nfs_init_commit(data, NULL, data->lseg, cinfo);
 			initiate_commit(data, how);
@@ -575,6 +575,49 @@ print_ds(struct nfs4_pnfs_ds *ds)
 		ds->ds_clp ? ds->ds_clp->cl_exchange_flags : 0);
 }
 
+static bool
+same_sockaddr(struct sockaddr *addr1, struct sockaddr *addr2)
+{
+	struct sockaddr_in *a, *b;
+	struct sockaddr_in6 *a6, *b6;
+
+	if (addr1->sa_family != addr2->sa_family)
+		return false;
+
+	switch (addr1->sa_family) {
+	case AF_INET:
+		a = (struct sockaddr_in *)addr1;
+		b = (struct sockaddr_in *)addr2;
+
+		if (a->sin_addr.s_addr == b->sin_addr.s_addr &&
+		    a->sin_port == b->sin_port)
+			return true;
+		break;
+
+	case AF_INET6:
+		a6 = (struct sockaddr_in6 *)addr1;
+		b6 = (struct sockaddr_in6 *)addr2;
+
+		/* LINKLOCAL addresses must have matching scope_id */
+		if (ipv6_addr_src_scope(&a6->sin6_addr) ==
+		    IPV6_ADDR_SCOPE_LINKLOCAL &&
+		    a6->sin6_scope_id != b6->sin6_scope_id)
+			return false;
+
+		if (ipv6_addr_equal(&a6->sin6_addr, &b6->sin6_addr) &&
+		    a6->sin6_port == b6->sin6_port)
+			return true;
+		break;
+
+	default:
+		dprintk("%s: unhandled address family: %u\n",
+			__func__, addr1->sa_family);
+		return false;
+	}
+
+	return false;
+}
+
 /*
  * Checks if 'dsaddrs1' contains a subset of 'dsaddrs2'. If it does,
  * declare a match.
@@ -592,7 +635,7 @@ _same_data_server_addrs_locked(const struct list_head *dsaddrs1,
 		match = false;
 		list_for_each_entry(da2, dsaddrs2, da_node) {
 			sa2 = (struct sockaddr *)&da2->da_addr;
-			match = rpc_cmp_addr_port(sa1, sa2);
+			match = same_sockaddr(sa1, sa2);
 			if (match)
 				break;
 		}
@@ -616,21 +659,6 @@ _data_server_lookup_locked(const struct list_head *dsaddrs)
 	return NULL;
 }
 
-static struct nfs4_pnfs_ds_addr *nfs4_pnfs_ds_addr_alloc(gfp_t gfp_flags)
-{
-	struct nfs4_pnfs_ds_addr *da = kzalloc(sizeof(*da), gfp_flags);
-	if (da)
-		INIT_LIST_HEAD(&da->da_node);
-	return da;
-}
-
-static void nfs4_pnfs_ds_addr_free(struct nfs4_pnfs_ds_addr *da)
-{
-	kfree(da->da_remotestr);
-	kfree(da->da_netid);
-	kfree(da);
-}
-
 static void destroy_ds(struct nfs4_pnfs_ds *ds)
 {
 	struct nfs4_pnfs_ds_addr *da;
@@ -646,7 +674,8 @@ static void destroy_ds(struct nfs4_pnfs_ds *ds)
 				      struct nfs4_pnfs_ds_addr,
 				      da_node);
 		list_del_init(&da->da_node);
-		nfs4_pnfs_ds_addr_free(da);
+		kfree(da->da_remotestr);
+		kfree(da);
 	}
 
 	kfree(ds->ds_remotestr);
@@ -812,7 +841,7 @@ static int _nfs4_pnfs_v3_ds_connect(struct nfs_server *mds_srv,
 	dprintk("--> %s DS %s\n", __func__, ds->ds_remotestr);
 
 	if (!load_v3_ds_connect())
-		return -EPROTONOSUPPORT;
+		goto out;
 
 	list_for_each_entry(da, &ds->ds_addrs, da_node) {
 		dprintk("%s: DS %s: trying address %s\n",
@@ -820,17 +849,12 @@ static int _nfs4_pnfs_v3_ds_connect(struct nfs_server *mds_srv,
 
 		if (!IS_ERR(clp)) {
 			struct xprt_create xprt_args = {
-				.ident = da->da_transport,
+				.ident = XPRT_TRANSPORT_TCP,
 				.net = clp->cl_net,
 				.dstaddr = (struct sockaddr *)&da->da_addr,
 				.addrlen = da->da_addrlen,
 				.servername = clp->cl_hostname,
 			};
-
-			if (da->da_transport != clp->cl_proto)
-				continue;
-			if (da->da_addr.ss_family != clp->cl_addr.ss_family)
-				continue;
 			/* Add this address as an alias */
 			rpc_clnt_add_xprt(clp->cl_rpcclient, &xprt_args,
 					rpc_clnt_test_and_add_xprt, NULL);
@@ -838,7 +862,7 @@ static int _nfs4_pnfs_v3_ds_connect(struct nfs_server *mds_srv,
 		}
 		clp = get_v3_ds_connect(mds_srv,
 				(struct sockaddr *)&da->da_addr,
-				da->da_addrlen, da->da_transport,
+				da->da_addrlen, IPPROTO_TCP,
 				timeo, retrans);
 		if (IS_ERR(clp))
 			continue;
@@ -876,7 +900,7 @@ static int _nfs4_pnfs_v4_ds_connect(struct nfs_server *mds_srv,
 
 		if (!IS_ERR(clp) && clp->cl_mvops->session_trunk) {
 			struct xprt_create xprt_args = {
-				.ident = da->da_transport,
+				.ident = XPRT_TRANSPORT_TCP,
 				.net = clp->cl_net,
 				.dstaddr = (struct sockaddr *)&da->da_addr,
 				.addrlen = da->da_addrlen,
@@ -884,21 +908,17 @@ static int _nfs4_pnfs_v4_ds_connect(struct nfs_server *mds_srv,
 			};
 			struct nfs4_add_xprt_data xprtdata = {
 				.clp = clp,
+				.cred = nfs4_get_clid_cred(clp),
 			};
 			struct rpc_add_xprt_test rpcdata = {
 				.add_xprt_test = clp->cl_mvops->session_trunk,
 				.data = &xprtdata,
 			};
 
-			if (da->da_transport != clp->cl_proto)
-				continue;
-			if (da->da_addr.ss_family != clp->cl_addr.ss_family)
-				continue;
 			/**
 			* Test this address for session trunking and
 			* add as an alias
 			*/
-			xprtdata.cred = nfs4_get_clid_cred(clp),
 			rpc_clnt_add_xprt(clp->cl_rpcclient, &xprt_args,
 					  rpc_clnt_setup_test_and_add_xprt,
 					  &rpcdata);
@@ -907,9 +927,8 @@ static int _nfs4_pnfs_v4_ds_connect(struct nfs_server *mds_srv,
 		} else {
 			clp = nfs4_set_ds_client(mds_srv,
 						(struct sockaddr *)&da->da_addr,
-						da->da_addrlen,
-						da->da_transport, timeo,
-						retrans, minor_version);
+						da->da_addrlen, IPPROTO_TCP,
+						timeo, retrans, minor_version);
 			if (IS_ERR(clp))
 				continue;
 
@@ -1000,26 +1019,55 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 	struct nfs4_pnfs_ds_addr *da = NULL;
 	char *buf, *portstr;
 	__be16 port;
-	ssize_t nlen, rlen;
+	int nlen, rlen;
 	int tmp[2];
-	char *netid;
-	size_t len;
+	__be32 *p;
+	char *netid, *match_netid;
+	size_t len, match_netid_len;
 	char *startsep = "";
 	char *endsep = "";
 
 
 	/* r_netid */
-	nlen = xdr_stream_decode_string_dup(xdr, &netid, XDR_MAX_NETOBJ,
-					    gfp_flags);
-	if (unlikely(nlen < 0))
+	p = xdr_inline_decode(xdr, 4);
+	if (unlikely(!p))
+		goto out_err;
+	nlen = be32_to_cpup(p++);
+
+	p = xdr_inline_decode(xdr, nlen);
+	if (unlikely(!p))
 		goto out_err;
 
+	netid = kmalloc(nlen+1, gfp_flags);
+	if (unlikely(!netid))
+		goto out_err;
+
+	netid[nlen] = '\0';
+	memcpy(netid, p, nlen);
+
 	/* r_addr: ip/ip6addr with port in dec octets - see RFC 5665 */
-	/* port is ".ABC.DEF", 8 chars max */
-	rlen = xdr_stream_decode_string_dup(xdr, &buf, INET6_ADDRSTRLEN +
-					    IPV6_SCOPE_ID_LEN + 8, gfp_flags);
-	if (unlikely(rlen < 0))
+	p = xdr_inline_decode(xdr, 4);
+	if (unlikely(!p))
 		goto out_free_netid;
+	rlen = be32_to_cpup(p);
+
+	p = xdr_inline_decode(xdr, rlen);
+	if (unlikely(!p))
+		goto out_free_netid;
+
+	/* port is ".ABC.DEF", 8 chars max */
+	if (rlen > INET6_ADDRSTRLEN + IPV6_SCOPE_ID_LEN + 8) {
+		dprintk("%s: Invalid address, length %d\n", __func__,
+			rlen);
+		goto out_free_netid;
+	}
+	buf = kmalloc(rlen + 1, gfp_flags);
+	if (!buf) {
+		dprintk("%s: Not enough memory\n", __func__);
+		goto out_free_netid;
+	}
+	buf[rlen] = '\0';
+	memcpy(buf, p, rlen);
 
 	/* replace port '.' with '-' */
 	portstr = strrchr(buf, '.');
@@ -1039,9 +1087,11 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 	}
 	*portstr = '\0';
 
-	da = nfs4_pnfs_ds_addr_alloc(gfp_flags);
+	da = kzalloc(sizeof(*da), gfp_flags);
 	if (unlikely(!da))
 		goto out_free_buf;
+
+	INIT_LIST_HEAD(&da->da_node);
 
 	if (!rpc_pton(net, buf, portstr-buf, (struct sockaddr *)&da->da_addr,
 		      sizeof(da->da_addr))) {
@@ -1057,11 +1107,15 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 	case AF_INET:
 		((struct sockaddr_in *)&da->da_addr)->sin_port = port;
 		da->da_addrlen = sizeof(struct sockaddr_in);
+		match_netid = "tcp";
+		match_netid_len = 3;
 		break;
 
 	case AF_INET6:
 		((struct sockaddr_in6 *)&da->da_addr)->sin6_port = port;
 		da->da_addrlen = sizeof(struct sockaddr_in6);
+		match_netid = "tcp6";
+		match_netid_len = 4;
 		startsep = "[";
 		endsep = "]";
 		break;
@@ -1072,14 +1126,11 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 		goto out_free_da;
 	}
 
-	da->da_transport = xprt_find_transport_ident(netid);
-	if (da->da_transport < 0) {
-		dprintk("%s: ERROR: unknown r_netid \"%s\"\n",
-			__func__, netid);
+	if (nlen != match_netid_len || strncmp(netid, match_netid, nlen)) {
+		dprintk("%s: ERROR: r_netid \"%s\" != \"%s\"\n",
+			__func__, netid, match_netid);
 		goto out_free_da;
 	}
-
-	da->da_netid = netid;
 
 	/* save human readable address */
 	len = strlen(startsep) + strlen(buf) + strlen(endsep) + 7;
@@ -1092,6 +1143,7 @@ nfs4_decode_mp_ds_addr(struct net *net, struct xdr_stream *xdr, gfp_t gfp_flags)
 
 	dprintk("%s: Parsed DS addr %s\n", __func__, da->da_remotestr);
 	kfree(buf);
+	kfree(netid);
 	return da;
 
 out_free_da:

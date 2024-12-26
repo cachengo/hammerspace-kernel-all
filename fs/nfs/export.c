@@ -10,7 +10,6 @@
 #include <linux/nfs_fs.h>
 
 #include "internal.h"
-#include "delegation.h"
 #include "nfstrace.h"
 
 #define NFSDBG_FACILITY		NFSDBG_VFS
@@ -49,10 +48,6 @@ nfs_encode_fh(struct inode *inode, __u32 *p, int *max_len, struct inode *parent)
 		*max_len = len;
 		return FILEID_INVALID;
 	}
-	if (IS_AUTOMOUNT(inode)) {
-		*max_len = FILEID_INVALID;
-		goto out;
-	}
 
 	p[FILEID_HIGH_OFF] = NFS_FILEID(inode) >> 32;
 	p[FILEID_LOW_OFF] = NFS_FILEID(inode);
@@ -60,7 +55,6 @@ nfs_encode_fh(struct inode *inode, __u32 *p, int *max_len, struct inode *parent)
 	p[len - 1] = 0; /* Padding */
 	nfs_copy_fh(clnt_fh, server_fh);
 	*max_len = len;
-out:
 	dprintk("%s: result fh fileid %llu mode %u size %d\n",
 		__func__, NFS_FILEID(inode), inode->i_mode, *max_len);
 	return *max_len;
@@ -120,9 +114,6 @@ nfs_fh_to_dentry(struct super_block *sb, struct fid *fid,
 
 out_found:
 	dentry = d_obtain_alias(inode);
-	if (IS_ERR(dentry))
-		trace_nfs_fh_to_dentry(sb, server_fh, fattr->fileid,
-				PTR_ERR(dentry));
 
 out_free_label:
 	nfs4_label_free(label);
@@ -163,15 +154,11 @@ nfs_get_parent(struct dentry *dentry)
 	ret = ops->lookupp(inode, &fh, fattr, label);
 	if (ret) {
 		parent = ERR_PTR(ret);
-		trace_nfs_get_parent(sb, NFS_FH(inode), NFS_FILEID(inode), ret);
 		goto out_free_label;
 	}
 
 	pinode = nfs_fhget(sb, &fh, fattr, label);
 	parent = d_obtain_alias(pinode);
-	if (IS_ERR(parent))
-		trace_nfs_get_parent(sb, NFS_FH(inode), NFS_FILEID(inode),
-				PTR_ERR(parent));
 out_free_label:
 	nfs4_label_free(label);
 out_free_fattr:
@@ -180,35 +167,8 @@ out:
 	return parent;
 }
 
-static int
-nfs_exp_getattr(struct path *path, struct kstat *stat, bool force)
-{
-	const unsigned long check_valid =
-		NFS_INO_INVALID_CHANGE | NFS_INO_INVALID_ATIME |
-		NFS_INO_INVALID_CTIME | NFS_INO_INVALID_MTIME |
-		NFS_INO_INVALID_SIZE | /* NFS_INO_INVALID_BLOCKS | */
-		NFS_INO_INVALID_OTHER | NFS_INO_INVALID_NLINK;
-	struct inode *inode = d_inode(path->dentry);
-	int flags = force ? AT_STATX_SYNC_AS_STAT : AT_STATX_DONT_SYNC;
-	int ret, ret2 = 0;
-
-	if (!force && nfs_check_cache_invalid(inode, check_valid))
-		ret2 = -EAGAIN;
-	ret = vfs_getattr(path, stat, STATX_BASIC_STATS & ~STATX_BLOCKS, flags);
-	if (ret < 0)
-		return ret;
-	stat->blocks = nfs_calc_block_size(stat->size);
-	if (S_ISDIR(inode->i_mode))
-		stat->blksize = NFS_SERVER(inode)->dtsize;
-	stat->result_mask |= STATX_BLOCKS;
-	return ret2;
-}
-
 const struct export_operations nfs_export_ops = {
 	.encode_fh = nfs_encode_fh,
 	.fh_to_dentry = nfs_fh_to_dentry,
 	.get_parent = nfs_get_parent,
-	.getattr = nfs_exp_getattr,
-	.flags = EXPORT_OP_NOWCC|EXPORT_OP_NOSUBTREECHK|
-		EXPORT_OP_CLOSE_BEFORE_UNLINK|EXPORT_OP_REMOTE_FS,
 };
